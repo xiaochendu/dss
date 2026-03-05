@@ -1,0 +1,23 @@
+# Conda environment for DSS (diffusion structure search).
+# Create: conda env create -f environment.yml
+# Activate: conda activate dss
+# Then: pip install -e .
+
+name: dss
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python>=3.9,<3.13
+  - pip
+  - pip:
+    - numpy
+    - pytorch
+    - tensorboard
+    - schnetpack
+    - pytorch-lightning
+    # MACE (mace_mp calculator for surface_eval)
+    - mace-torch
+    - torch-dftd
+    # Re-pin ASE after mace-torch (mace-torch pulls ase>=3.26; we need <3.26 for schnetpack)
+    - "ase>=3.21,<3.26"
