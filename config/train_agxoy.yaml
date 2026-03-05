@@ -1,0 +1,52 @@
+# DSS AgxOy training config (same dataset layout as snowyflow).
+# Override from CLI: python scripts/train.py --config config/train_agxoy.yaml --data_path /path/to/data
+# Or override in YAML and run: python scripts/train.py --config config/train_agxoy.yaml
+
+# Data
+data_path: null  # required; set via CLI or override
+mcmc_files: null # e.g. [agox_sample_AgxOy_2000.xyz]; null = glob agox_sample_AgxOy_*.xyz
+path: "dataset.db"
+
+# Training
+batch_size: 32
+max_epochs: 100
+lr: 0.001
+limit_train_batches: null
+limit_val_batches: null
+# Run validation every N fraction of epoch (1.0 = every epoch; 0.5 = twice per epoch; 2.0 = every 2 epochs)
+val_check_interval: 1.0
+
+# Model
+cutoff: 6.0
+n_atom_basis: 64
+n_rbf: 30
+
+# DataLoader
+num_workers: 0
+
+# Logging (Wandb)
+# wandb_project / wandb_run support {n_atom_basis}, {n_rbf}, {batch_size}, {lr}, {max_epochs}, etc. from this config
+wandb: false
+wandb_project: "dss"
+wandb_run: "dss_agxoy_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}"
+wandb_dir: null
+
+# Surface eval (validation-time sampling + energy/composition metrics and plots)
+# When surface_eval: true, on fit start train energies are precomputed; each validation
+# samples structures and logs val/energy_*, val/composition_wasserstein, and figures.
+# Validation runs every epoch (Lightning default). With mace_model set, the callback
+# loads MACE in on_fit_start for train/sampled energies.
+surface_eval: false
+val_sample_num_samples: 256
+val_sample_num_steps: 100
+val_sample_postrelax_steps: 0
+val_save_trajectories: false  # if true, save sampling trajectories as XYZ under val_trajectories_dir (one file per sample per epoch)
+val_trajectories_dir: "val_trajectories"
+
+# MACE (optional; used by surface eval when mace_model is set)
+mace_model: null  # path or URL to .model file; null = use potential_model for energies
+mace_head: "omat_pbe"
+mace_device: "cuda"
+mace_dtype: "float64"
+mace_dispersion: true
+mace_enable_cueq: false

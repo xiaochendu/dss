@@ -1,3 +1,34 @@
+def get_dataset_agxoy(
+    data_path,
+    template_system="111_c4x8",
+    mcmc_xyz_files=None,
+    z_confinement=None,
+    path="dataset.db",
+    batch_size=32,
+    num_train=0.90,
+    num_val=0.1,
+    num_workers=0,
+    cutoff=6.0,
+    neighbour_list=None,
+    split_file="split.npz",
+):
+    """Load AgxOy dataset from directory (same layout as snowyflow). Returns (datamodule, template_atoms, z_confinement)."""
+    from dss.data import agxoy as _agxoy
+    return _agxoy.get_dataset_agxoy(
+        data_path=data_path,
+        template_system=template_system,
+        mcmc_xyz_files=mcmc_xyz_files,
+        z_confinement=z_confinement,
+        path=path,
+        batch_size=batch_size,
+        num_train=num_train,
+        num_val=num_val,
+        num_workers=num_workers,
+        cutoff=cutoff,
+        neighbour_list=neighbour_list,
+        split_file=split_file,
+    )
+
 
 def get_dataset(
     atoms,
@@ -165,6 +196,89 @@ def get_diffusion_model(
     return diffusion, neighbour_list
 
 
+def get_energies_for_atoms(diffusion, atoms_list, num_template, z_confinement, batch_size=32):
+    """Get energies for a list of ASE atoms using the diffusion model's potential.
+
+    Converts atoms to batch format (mask, z_confinement), runs preprocess_batch
+    and potential_model, returns per-structure energies.
+
+    Args:
+        diffusion: VPDiffusion module (must have potential_model).
+        atoms_list: List of ASE Atoms (same num_template each).
+        num_template: Number of template (fixed) atoms per structure.
+        z_confinement: (z_min, z_max) or array of shape (2,).
+        batch_size: Max structures per batch for inference.
+
+    Returns:
+        torch.Tensor of shape (len(atoms_list),) with total energy per structure (eV).
+    """
+    import numpy as np
+    import schnetpack as spk
+    import torch
+    from ase import Atoms
+
+    if getattr(diffusion, "potential_model", None) is None:
+        raise ValueError("diffusion.potential_model is None; cannot compute energies")
+
+    z = np.asarray(z_confinement, dtype=np.float32)
+    if z.ndim == 1:
+        z = z.reshape(1, 2)
+    device = next(diffusion.parameters()).device
+
+    all_energies = []
+    for start in range(0, len(atoms_list), batch_size):
+        chunk = atoms_list[start : start + batch_size]
+        # Mask: first num_template True, rest False per structure
+        mask_list = [
+            np.vstack([
+                np.ones((num_template, 3), dtype=bool),
+                np.zeros((len(a) - num_template, 3), dtype=bool),
+            ])
+            for a in chunk
+        ]
+        mask = torch.tensor(np.vstack(mask_list), device=device)
+        z_batch = torch.tensor(
+            np.tile(z, (len(chunk), 1)),
+            dtype=torch.float32,
+            device=device,
+        )
+        converter = spk.interfaces.AtomsConverter(
+            neighbor_list=None,
+            additional_inputs={"mask": mask, "z_confinement": z_batch},
+            device=str(device),
+        )
+        data = converter(chunk)
+        if data["_pbc"].dim() > 1:
+            data["_pbc"] = data["_pbc"].view(-1)
+        # Converter may hand z_confinement per-atom; _split_batch expects (n_structures, 2)
+        n_structures = len(chunk)
+        data["z_confinement"] = z_batch.to(device).view(n_structures, 2)
+        # Map converter keys to schnetpack properties if needed (preprocess_batch expects these)
+        from schnetpack import properties as prop
+        if prop.R not in data:
+            data[prop.R] = data["_positions"]
+        if prop.Z not in data:
+            data[prop.Z] = data["_atomic_numbers"]
+        if prop.n_atoms not in data and "_n_atoms" in data:
+            data[prop.n_atoms] = data["_n_atoms"]
+        if prop.idx_m not in data and "_idx_m" in data:
+            data[prop.idx_m] = data["_idx_m"]
+        if prop.cell not in data and "_cell" in data:
+            data[prop.cell] = data["_cell"]
+        if prop.pbc not in data and "_pbc" in data:
+            data[prop.pbc] = data["_pbc"]
+        with torch.no_grad():
+            batch = diffusion.preprocess_batch(data, save_keys=[])
+            out = diffusion.potential_model(batch)
+        e = out["energy"]
+        if e.dim() == 0:
+            e = e.unsqueeze(0)
+        elif e.size(0) != len(chunk):
+            e = e.view(len(chunk), -1).sum(1)
+        all_energies.append(e.cpu())
+    return torch.cat(all_energies, dim=0)
+
+
 def sample(
         diffusion, num_samples, template, symbols, z_confinement, num_steps=1000, eta=1e-2, postrelax_steps=100,
         return_trajectories=False,
@@ -186,13 +300,17 @@ def sample(
             )
             try:
                 e, f = b["energy"].cpu().item(), b["forces"].cpu().detach().numpy().reshape(-1, 3)
-                a.set_calculator(SinglePointCalculator(a, energy=e, forces=f))                
-            except:
+                a.calc = SinglePointCalculator(a, energy=e, forces=f)
+            except Exception:
                 print('No predicted energies and forces')
 
             atoms.append(a)
         return atoms
 
+    dev = next(diffusion.parameters()).device
+    z_conf = torch.tensor(np.asarray(z_confinement), dtype=torch.float32, device=dev)
+    if z_conf.dim() == 1:
+        z_conf = z_conf.unsqueeze(0)
     converter = spk.interfaces.AtomsConverter(
         neighbor_list=None,
         additional_inputs={
@@ -202,11 +320,12 @@ def sample(
                         np.ones((len(template), 3), dtype=bool),
                         np.zeros((len(symbols), 3), dtype=bool),
                     ]
-                )
+                ),
+                device=dev,
             ),
-            "z_confinement": z_confinement,
+            "z_confinement": z_conf,
         },
-        device='cuda'
+        device=str(dev),
     )
 
     # generate data

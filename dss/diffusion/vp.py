@@ -84,6 +84,7 @@ class VPDiffusion(pl.LightningModule):
         self.eps = torch.tensor(eps)
 
         self.potential_model = potential_model
+
         self.loss_config = loss_config
 
         if self.score_model.cond_dim > 0:
@@ -231,8 +232,9 @@ class VPDiffusion(pl.LightningModule):
 
         """
         losses = self.loss(batch, batch_idx)
+        batch_size = len(batch["_idx"])
         for k, v in losses.items():
-            self.log("train_" + k, v)
+            self.log("train_" + k, v, batch_size=batch_size)
         return losses["loss"]
 
     def validation_step(self, batch: Dict, batch_idx: torch.Tensor) -> torch.Tensor:
@@ -256,8 +258,9 @@ class VPDiffusion(pl.LightningModule):
             torch.set_grad_enabled(True)
 
         losses = self.loss(batch, batch_idx)
+        batch_size = len(batch["_idx"])
         for k, v in losses.items():
-            self.log("val_" + k, v)
+            self.log("val_" + k, v, batch_size=batch_size)
         return losses["loss"]
 
     def configure_optimizers(self) -> Dict:
