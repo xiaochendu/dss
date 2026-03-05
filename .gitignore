@@ -3,3 +3,6 @@ dss/__pycache__/
 dss/diffusion/__pycache__/
 dss/models/__pycache__/
 dss/utils/__pycache__/
+*.pyc*
+*logs*
+*.log
