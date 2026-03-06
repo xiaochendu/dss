@@ -15,7 +15,8 @@ Examples:
     python scripts/train.py --data_path /path/to/data --surface_eval --val_sample_num_samples 256
 
 Wandb: Use --wandb to log to Weights & Biases. Set WANDB_ENTITY or log in with
-    wandb login. Logs are written to --wandb_dir (default: <data_path>/dss_run/wandb).
+    wandb login. By default W&B files are written to the run directory
+    (<run_root>/<run_dir_template>), unless --wandb_dir is explicitly set.
 
 Surface eval: Use --surface_eval to enable validation-time sampling and surface metrics
     (energy distribution, composition Wasserstein, energy per composition, optional surface stability).
@@ -24,6 +25,7 @@ Surface eval: Use --surface_eval to enable validation-time sampling and surface 
 """
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Ensure dss is importable when run as script
@@ -34,6 +36,9 @@ import yaml
 
 from dss import get_dataset_agxoy, get_diffusion_model
 from dss.callbacks import SurfaceEvalCallback
+from dss.data.constants.agxoy import mask_index
+from dss.data.constants.agxoy import number_to_element as agxoy_number_to_element
+from dss.energy.mace import MACEEnergyModel
 from dss.utils import TorchNeighborList
 
 
@@ -52,13 +57,31 @@ def _format_wandb_template(s: str, args) -> str:
         return s
 
 
+def _format_run_dir_template(template: str, args) -> str:
+    """Format run dir template with args and {now:...} timestamp token."""
+    if not template:
+        return ""
+    out = _format_wandb_template(template, args)
+    if "{now:" in out:
+        i = out.find("{now:")
+        j = out.find("}", i)
+        if j != -1:
+            dt_fmt = out[i + 5 : j]
+            out = out[:i] + datetime.now().strftime(dt_fmt) + out[j + 1 :]
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description="Train DSS on AgxOy surface structures")
     p.add_argument("--config", type=str, default=None, help="Path to YAML config (e.g. config/train_agxoy.yaml); CLI overrides config")
     p.add_argument("--data_path", type=str, default=None, help="Directory with template_*.xyz and agox_sample_AgxOy_*.xyz")
+    p.add_argument("--val_data_path", type=str, default=None, help="Optional separate directory for validation dataset. If set, val split is built from this path.")
     p.add_argument("--mcmc_files", type=str, nargs="*", default=None, help="MCMC XYZ filenames only (e.g. agox_sample_AgxOy_2000.xyz). If not set, glob agox_sample_AgxOy_*.xyz")
     p.add_argument("--path", type=str, default="dataset.db", help="Path for created .db and split.npz")
     p.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    p.add_argument("--num_train", type=float, default=0.9, help="Fraction of data for training")
+    p.add_argument("--num_val", type=float, default=0.1, help="Fraction for validation")
+    p.add_argument("--reuse_train_for_val", action="store_true", help="Reuse training split as validation dataset (useful with num_train=1.0 while keeping validation hooks/callbacks active).")
     p.add_argument("--max_epochs", type=int, default=100, help="Max training epochs")
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     p.add_argument("--cutoff", type=float, default=6.0, help="Cutoff for neighbour list (Ang)")
@@ -67,17 +90,24 @@ def main():
     p.add_argument("--num_workers", type=int, default=0, help="DataLoader num_workers (0 for stability)")
     p.add_argument("--limit_train_batches", type=int, default=None, help="If set, limit train batches per epoch (for quick test)")
     p.add_argument("--limit_val_batches", type=int, default=None, help="If set, limit val batches per epoch")
-    p.add_argument("--val_check_interval", type=float, default=1.0, help="Run validation every N fraction of epoch (1.0=every epoch, 0.5=twice per epoch, 2.0=every 2 epochs). Passed to Trainer.")
+    p.add_argument("--check_val_every_n_epoch", type=int, default=1, help="Run validation every N epochs (default: 1).")
+    p.add_argument("--val_check_interval", type=float, default=None, help="Optional intra-epoch validation interval passed to Trainer (e.g. 0.5=twice/epoch). If unset, epoch-based scheduling is used.")
     # Wandb
     p.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
     p.add_argument("--wandb_project", type=str, default="dss", help="Wandb project name")
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name (default: auto)")
-    p.add_argument("--wandb_dir", type=str, default=None, help="Wandb save_dir (default: <run_dir>/wandb or ./wandb)")
+    p.add_argument("--wandb_dir", type=str, default=None, help="Wandb save_dir override. If null, uses run dir.")
+    # Run/output directory (hydra-like)
+    p.add_argument("--run_root", type=str, default="./outputs/agxoy", help="Base output directory for this experiment family")
+    p.add_argument("--run_dir_template", type=str, default="dss_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}/{now:%Y-%m-%d_%H-%M-%S}", help="Run subdir template under run_root. Supports arg placeholders and {now:strftime}.")
     # Surface eval (validation-time sampling + metrics)
     p.add_argument("--surface_eval", action="store_true", help="Enable surface eval callback (sample at val, log energy/composition metrics and plots)")
     p.add_argument("--val_sample_num_samples", type=int, default=256, help="Number of structures to sample per validation for surface eval")
     p.add_argument("--val_sample_num_steps", type=int, default=100, help="Diffusion time steps per validation sampling (default 100)")
     p.add_argument("--val_sample_postrelax_steps", type=int, default=0, help="Postrelaxation time steps per validation sampling (default 0)")
+    p.add_argument("--val_use_regressor_guidance", action="store_true", help="Use regressor_guidance_sample for validation sampling. Default uses VPDiffusion.sample (unguided).")
+    p.add_argument("--val_guidance_eta", type=float, default=1e-2, help="Guidance strength eta for regressor_guidance_sample when enabled.")
+    p.add_argument("--train_energies_path", type=str, default=None, help="Optional path to precomputed train_energies.pt for surface eval (if missing, it will be computed and saved there)")
     p.add_argument("--val_save_trajectories", action="store_true", help="Save validation sampling trajectories as XYZ (one multi-frame file per sample, under val_trajectories_dir)")
     p.add_argument("--val_trajectories_dir", type=str, default="val_trajectories", help="Subdir under log dir for trajectory XYZ files (default: val_trajectories)")
     # MACE (optional; used by surface eval callback when set)
@@ -105,6 +135,11 @@ def main():
     if args.data_path is None:
         p.error("--data_path is required (or set data_path in --config YAML)")
 
+    # Build run root (hydra-like run dir template)
+    run_subdir = _format_run_dir_template(args.run_dir_template, args)
+    run_root = (Path(args.run_root).expanduser() / run_subdir).resolve()
+    run_root.mkdir(parents=True, exist_ok=True)
+
     # Shared neighbour list for dataset and model (same cutoff)
     neighbour_list = TorchNeighborList(args.cutoff)
 
@@ -113,10 +148,8 @@ def main():
         db_path = args.path
         split_path = str(Path(args.path).parent / "split.npz")
     else:
-        run_dir = Path(args.data_path).resolve() / "dss_run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        db_path = str(run_dir / (args.path if args.path != "dataset.db" else "dataset.db"))
-        split_path = str(run_dir / "split.npz")
+        db_path = str(run_root / (args.path if args.path != "dataset.db" else "dataset.db"))
+        split_path = str(run_root / "split.npz")
 
     # Load AgxOy dataset (same layout as snowyflow)
     datamodule, template_atoms, z_confinement = get_dataset_agxoy(
@@ -125,10 +158,50 @@ def main():
         path=db_path,
         split_file=split_path,
         batch_size=args.batch_size,
+        num_train=args.num_train,
+        num_val=args.num_val,
         num_workers=args.num_workers,
         cutoff=args.cutoff,
         neighbour_list=neighbour_list,
     )
+
+    # Optional validation dataset override.
+    # - If val_data_path is set: build a val-only split from that path and use it as datamodule val set.
+    # - Else if requested: reuse train split as val (keeps validation hooks active with num_val=0).
+    if args.val_data_path is not None:
+        val_db_path = str(run_root / "val_dataset.db")
+        val_split_path = str(run_root / "val_split.npz")
+        val_dm, _, _ = get_dataset_agxoy(
+            args.val_data_path,
+            mcmc_xyz_files=args.mcmc_files,
+            path=val_db_path,
+            split_file=val_split_path,
+            batch_size=args.batch_size,
+            num_train=0.0,
+            num_val=1.0,
+            num_workers=args.num_workers,
+            cutoff=args.cutoff,
+            neighbour_list=neighbour_list,
+        )
+        datamodule._val_dataset = val_dm.val_dataset
+        datamodule._val_dataloader = None
+    elif args.reuse_train_for_val:
+        datamodule._val_dataset = datamodule.train_dataset
+        datamodule._val_dataloader = None
+
+    # Optional centralized MACE initialization.
+    mace_energy_model = None
+    if args.mace_model is not None:
+        number_to_element = {k: v for k, v in agxoy_number_to_element.items() if k <= mask_index}
+        mace_energy_model = MACEEnergyModel(
+            model=args.mace_model,
+            head=args.mace_head,
+            device=args.mace_device,
+            default_dtype=args.mace_dtype,
+            dispersion=args.mace_dispersion,
+            enable_cueq=args.mace_enable_cueq,
+            number_to_element=number_to_element,
+        )
 
     # Build diffusion model
     diffusion, _ = get_diffusion_model(
@@ -137,6 +210,7 @@ def main():
         n_rbf=args.n_rbf,
         lr=args.lr,
         neighbour_list=neighbour_list,
+        potential_model_instance=mace_energy_model,
     )
 
     # Logger: Wandb if requested, else default TensorBoard
@@ -146,10 +220,7 @@ def main():
             from pytorch_lightning.loggers import WandbLogger
         except ImportError:
             raise ImportError("Wandb logging requires: pip install wandb")
-        wandb_save_dir = args.wandb_dir
-        if wandb_save_dir is None:
-            run_dir = Path(args.data_path).resolve() / "dss_run"
-            wandb_save_dir = str(run_dir / "wandb")
+        wandb_save_dir = str(Path(args.wandb_dir).expanduser().resolve()) if args.wandb_dir else str(run_root)
         logger = WandbLogger(
             project=_format_wandb_template(args.wandb_project, args),
             name=_format_wandb_template(args.wandb_run, args) or None,
@@ -178,23 +249,31 @@ def main():
                 val_sample_num_samples=args.val_sample_num_samples,
                 val_sample_num_steps=args.val_sample_num_steps,
                 val_sample_postrelax_steps=args.val_sample_postrelax_steps,
+                val_use_regressor_guidance=args.val_use_regressor_guidance,
+                val_guidance_eta=args.val_guidance_eta,
+                train_energies_path=args.train_energies_path,
                 val_save_trajectories=args.val_save_trajectories,
                 val_trajectories_dir=args.val_trajectories_dir,
+                mace_energy_model_instance=mace_energy_model,
                 **mace_kwargs,
             )
         )
 
     # Train (single device to avoid multi-process db issues)
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
         max_epochs=args.max_epochs,
         accelerator="auto",
         devices=1,
         logger=logger,
+        default_root_dir=str(run_root),
         callbacks=callbacks,
         limit_train_batches=args.limit_train_batches,
         limit_val_batches=args.limit_val_batches,
-        val_check_interval=args.val_check_interval,
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
     )
+    if args.val_check_interval is not None:
+        trainer_kwargs["val_check_interval"] = args.val_check_interval
+    trainer = pl.Trainer(**trainer_kwargs)
     trainer.fit(diffusion, datamodule)
     print("Training finished. Template and z_confinement available for sampling.")
 

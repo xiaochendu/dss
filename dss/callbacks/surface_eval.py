@@ -4,6 +4,7 @@ Uses only dss.helpers, dss.tools.surface_eval, and dss.data.constants (no snowyf
 """
 
 import io
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +27,8 @@ def _save_val_trajectories(
     atoms_trajs: list[list],
     log_dir: Path,
     subdir: str,
+    step_idx: int = 0,
+    start_idx: int = 0,
 ) -> None:
     """Write validation sampling trajectories to XYZ files (one multi-frame file per sample)."""
     import ase.io
@@ -33,9 +36,51 @@ def _save_val_trajectories(
     traj_dir = log_dir / subdir / f"epoch_{trainer.current_epoch}"
     traj_dir.mkdir(parents=True, exist_ok=True)
     for j, traj in enumerate(atoms_trajs):
-        path = traj_dir / f"sample_{j:04d}.xyz"
+        path = traj_dir / f"step_{step_idx:04d}_sample_{start_idx + j:04d}.xyz"
         ase.io.write(path, traj, format="xyz")
     return None
+
+
+def _infer_sampling_symbols(
+    template_atoms,
+    num_template: int,
+    train_symbol_lists: list[list[str]],
+) -> list[str]:
+    """Infer mobile species list from training structures (tail after template atoms)."""
+    # If template already includes mobile atoms, keep existing behavior.
+    template_syms = template_atoms.get_chemical_symbols()[num_template:]
+    if template_syms:
+        return list(template_syms)
+    # Otherwise infer from data: use the most common non-empty tail composition.
+    tails = []
+    for syms in train_symbol_lists:
+        if len(syms) > num_template:
+            tail = tuple(syms[num_template:])
+            if len(tail) > 0:
+                tails.append(tail)
+    if tails:
+        most_common_tail, _ = Counter(tails).most_common(1)[0]
+        return list(most_common_tail)
+    return []
+
+
+def _sample_symbol_tails_from_train(
+    train_symbol_lists: list[list[str]],
+    num_template: int,
+    num_samples: int,
+    rng: np.random.Generator,
+) -> list[list[str]]:
+    """Sample per-structure adsorbate tails from train-set composition distribution."""
+    tails = []
+    for syms in train_symbol_lists:
+        if len(syms) > num_template:
+            tail = list(syms[num_template:])
+            if len(tail) > 0:
+                tails.append(tail)
+    if not tails:
+        return []
+    idx = rng.integers(0, len(tails), size=num_samples)
+    return [tails[int(i)] for i in idx]
 
 
 def _batch_to_symbol_lists(batch: dict, num_template: int) -> list[list[str]]:
@@ -120,6 +165,8 @@ class SurfaceEvalCallback(pl.Callback):
         val_sample_num_samples: int = 256,
         val_sample_num_steps: int = 100,
         val_sample_postrelax_steps: int = 100,
+        val_use_regressor_guidance: bool = False,
+        val_guidance_eta: float = 1e-2,
         val_save_trajectories: bool = False,
         val_trajectories_dir: str = "val_trajectories",
         val_surface_chem_pots: Optional[list[dict]] = None,
@@ -132,6 +179,8 @@ class SurfaceEvalCallback(pl.Callback):
         mace_dtype: str = "float64",
         mace_dispersion: bool = True,
         mace_enable_cueq: bool = False,
+        mace_energy_model_instance: Optional[Any] = None,
+        train_energies_path: Optional[str] = None,
         val_energy_range: Optional[tuple[float, float]] = None,
         energy_batch_size: int = 32,
     ):
@@ -142,6 +191,8 @@ class SurfaceEvalCallback(pl.Callback):
         self.val_sample_num_samples = val_sample_num_samples
         self.val_sample_num_steps = val_sample_num_steps
         self.val_sample_postrelax_steps = val_sample_postrelax_steps
+        self.val_use_regressor_guidance = val_use_regressor_guidance
+        self.val_guidance_eta = val_guidance_eta
         self.val_save_trajectories = val_save_trajectories
         self.val_trajectories_dir = val_trajectories_dir
         self.val_surface_chem_pots = val_surface_chem_pots or []
@@ -158,29 +209,45 @@ class SurfaceEvalCallback(pl.Callback):
                 "dispersion": mace_dispersion,
                 "enable_cueq": mace_enable_cueq,
             }
-        self._mace_model = None  # loaded in on_fit_start when _mace_config is set
+        # Prefer injected MACE instance; fallback lazy-load from _mace_config in on_fit_start.
+        self._mace_model = mace_energy_model_instance
         self.val_energy_range = val_energy_range
         self.energy_batch_size = energy_batch_size
+        self._train_energies_path_override = (
+            Path(train_energies_path).expanduser() if train_energies_path else None
+        )
 
         self._train_energies_path: Optional[Path] = None
         self._train_symbol_lists: Optional[list] = None
+        self._val_step_idx: int = 0
+        self._val_sampled_energies: list[torch.Tensor] = []
+        self._val_sampled_atoms: list = []
+        self._val_sampled_symbol_lists: list[list[str]] = []
+        self._val_losses: list[float] = []
 
     def _log_dir(self, trainer: pl.Trainer) -> Path:
-        d = trainer.log_dir
+        # Keep callback artifacts under the trainer root so users can control
+        # a single output directory (e.g., with --wandb_dir).
+        d = trainer.default_root_dir
         if d is None:
-            d = Path(trainer.default_root_dir or ".")
+            d = trainer.log_dir
+        if d is None:
+            d = "."
         return Path(d)
 
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Precompute train energies (and symbol lists) and save to log_dir. Load MACE here when config set."""
+        """Precompute train energies and symbol lists; lazily load MACE only as fallback."""
+        # Expose callback to LightningModule so validation flow can be orchestrated
+        # from VPDiffusion.on_validation_epoch_end.
+        setattr(pl_module, "_surface_eval_callback", self)
         log_dir = self._log_dir(trainer)
-        self._train_energies_path = log_dir / "train_energies.pt"
+        self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
         if self._train_energies_path.exists():
             data = torch.load(self._train_energies_path, weights_only=False)
             self._train_symbol_lists = data.get("symbol_lists", [])
             return
 
-        use_mace = self._mace_config is not None
+        use_mace = self._mace_model is not None or self._mace_config is not None
         use_potential = getattr(pl_module, "potential_model", None) is not None
         if not use_mace and not use_potential:
             return
@@ -189,16 +256,17 @@ class SurfaceEvalCallback(pl.Callback):
         dataloader = trainer.datamodule.train_dataloader()
 
         if use_mace:
-            from dss.data.constants.agxoy import mask_index
-            from dss.data.constants.agxoy import \
-                number_to_element as agxoy_number_to_element
-            from dss.energy.mace import MACEEnergyModel
+            if self._mace_model is None:
+                from dss.data.constants.agxoy import mask_index
+                from dss.data.constants.agxoy import \
+                    number_to_element as agxoy_number_to_element
+                from dss.energy.mace import MACEEnergyModel
 
-            number_to_element = {k: v for k, v in agxoy_number_to_element.items() if k <= mask_index}
-            self._mace_model = MACEEnergyModel(
-                number_to_element=number_to_element,
-                **self._mace_config,
-            )
+                number_to_element = {k: v for k, v in agxoy_number_to_element.items() if k <= mask_index}
+                self._mace_model = MACEEnergyModel(
+                    number_to_element=number_to_element,
+                    **self._mace_config,
+                )
             train_atoms = []
             for batch in dataloader:
                 batch = {k: v.to(pl_module.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
@@ -225,7 +293,7 @@ class SurfaceEvalCallback(pl.Callback):
             train_energies = torch.cat(train_energies_list, dim=0)
 
         self._train_symbol_lists = train_symbol_lists
-        log_dir.mkdir(parents=True, exist_ok=True)
+        self._train_energies_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {"energies": train_energies, "symbol_lists": train_symbol_lists, "num_template": self.num_template},
             self._train_energies_path,
@@ -240,26 +308,63 @@ class SurfaceEvalCallback(pl.Callback):
         ]:
             trainer.logger.log_metrics({key: val}, step=trainer.global_step)
 
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
-        """Sample structures, compute energies, run surface_eval and log metrics/images."""
-        if getattr(pl_module, "potential_model", None) is None:
-            return
+    def _load_train_reference(self, trainer: pl.Trainer) -> tuple[torch.Tensor, list[list[str]], int] | None:
+        """Load train energies/symbols reference used for composition-energy comparison."""
         log_dir = self._log_dir(trainer)
-
-        # Load train energies (and symbol lists)
         if self._train_energies_path is None:
-            self._train_energies_path = log_dir / "train_energies.pt"
+            self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
         if not self._train_energies_path.exists():
-            return
+            return None
         data = torch.load(self._train_energies_path, weights_only=False)
         train_energies = data["energies"]
         self._train_symbol_lists = data.get("symbol_lists", [])
         num_template = data.get("num_template", self.num_template)
+        return train_energies, self._train_symbol_lists, num_template
 
-        # Sample (optionally with trajectories for inspection)
-        symbols = self.template_atoms.get_chemical_symbols()[num_template:]
-        if not symbols:
-            symbols = list(self.species_names) * (len(self.template_atoms) - num_template)
+    def on_validation_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Reset per-epoch accumulators for sampled validation outputs."""
+        self._val_step_idx = 0
+        self._val_sampled_energies = []
+        self._val_sampled_atoms = []
+        self._val_sampled_symbol_lists = []
+        self._val_losses = []
+
+    def run_validation_step(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        val_loss: Optional[float] = None,
+    ) -> None:
+        """Run one sampling/eval pass during a validation step and collect outputs."""
+        if getattr(pl_module, "potential_model", None) is None:
+            return
+        ref = self._load_train_reference(trainer)
+        if ref is None:
+            return
+        _, train_symbol_lists, num_template = ref
+        log_dir = self._log_dir(trainer)
+
+        # Sample on each validation step (snowyflow-style accumulation)
+        rng = np.random.default_rng(trainer.current_epoch * 100000 + self._val_step_idx)
+        symbol_tails = _sample_symbol_tails_from_train(
+            train_symbol_lists or [],
+            num_template,
+            self.val_sample_num_samples,
+            rng,
+        )
+        if symbol_tails:
+            symbols = symbol_tails  # per-sample compositions drawn from train distribution
+        else:
+            symbols = _infer_sampling_symbols(
+                self.template_atoms, num_template, self._train_symbol_lists or []
+            )
+            if not symbols:
+                # Keep old fallback, but this is likely a slab-only setup.
+                symbols = list(self.species_names) * (len(self.template_atoms) - num_template)
+                if trainer.logger is not None:
+                    trainer.logger.log_metrics(
+                        {"val/warn_no_mobile_symbols": 1.0}, step=trainer.global_step
+                    )
         out = sample(
             pl_module,
             self.val_sample_num_samples,
@@ -267,13 +372,20 @@ class SurfaceEvalCallback(pl.Callback):
             symbols,
             self.z_confinement,
             num_steps=self.val_sample_num_steps,
+            eta=self.val_guidance_eta,
             postrelax_steps=self.val_sample_postrelax_steps,
             return_trajectories=self.val_save_trajectories,
+            use_regressor_guidance=self.val_use_regressor_guidance,
         )
         if self.val_save_trajectories:
             sampled_atoms, atoms_trajs = out
             _save_val_trajectories(
-                trainer, atoms_trajs, log_dir, self.val_trajectories_dir
+                trainer,
+                atoms_trajs,
+                log_dir,
+                self.val_trajectories_dir,
+                step_idx=self._val_step_idx,
+                start_idx=self._val_step_idx * self.val_sample_num_samples,
             )
         else:
             sampled_atoms = out
@@ -287,14 +399,29 @@ class SurfaceEvalCallback(pl.Callback):
             sampled_energies = get_energies_for_atoms(
                 pl_module, sampled_atoms, num_template, self.z_confinement, batch_size=self.energy_batch_size
             )
+        self._val_sampled_energies.append(sampled_energies.detach().cpu())
+        self._val_sampled_atoms.extend(sampled_atoms)
+        self._val_sampled_symbol_lists.extend([a.get_chemical_symbols() for a in sampled_atoms])
+        if val_loss is not None:
+            self._val_losses.append(float(val_loss))
+        self._val_step_idx += 1
+
+    def finalize_validation_epoch(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Aggregate stepwise sampled outputs and log/plot epoch-level metrics."""
+        ref = self._load_train_reference(trainer)
+        if ref is None:
+            return
+        train_energies, train_symbol_lists, num_template = ref
+        if len(self._val_sampled_energies) == 0:
+            return
+        sampled_energies = torch.cat(self._val_sampled_energies, dim=0)
 
         # Compositions
         train_compositions = surf.compositions_from_symbol_lists(
-            self._train_symbol_lists, [num_template] * len(self._train_symbol_lists), self.species_names
+            train_symbol_lists, [num_template] * len(train_symbol_lists), self.species_names
         )
-        sampled_symbol_lists = [a.get_chemical_symbols() for a in sampled_atoms]
         sampled_compositions = surf.compositions_from_symbol_lists(
-            sampled_symbol_lists, [num_template] * len(sampled_atoms), self.species_names
+            self._val_sampled_symbol_lists, [num_template] * len(self._val_sampled_symbol_lists), self.species_names
         )
 
         energies_dict = {"Train": train_energies, "Sampled": sampled_energies}
@@ -306,6 +433,8 @@ class SurfaceEvalCallback(pl.Callback):
             trainer.logger.log_metrics({f"val/{k}": v}, step=trainer.global_step)
         comp_w = surf.wasserstein_composition(train_compositions, sampled_compositions, use_first_species_only=True)
         trainer.logger.log_metrics({"val/composition_wasserstein": comp_w}, step=trainer.global_step)
+        if len(self._val_losses) > 0:
+            trainer.logger.log_metrics({"val/loss_sample_mean": float(np.mean(self._val_losses))}, step=trainer.global_step)
 
         # Energy distribution figure
         fig = surf.plot_energy_distribution(
@@ -330,20 +459,28 @@ class SurfaceEvalCallback(pl.Callback):
                 "ref_formula": AGXOY_REF_FORMULA,
                 "ref_element": AGXOY_REF_ELEMENT,
             }
-            data_list = [{"atoms": a, "energy": float(sampled_energies[i]), "label": "VSSR-MC sample"} for i, a in enumerate(sampled_atoms)]
-            energies_list = [float(sampled_energies[i]) for i in range(len(sampled_atoms))]
-            figs = surf.plot_surface_stability(
-                data_list,
-                self.val_surface_chem_pots,
-                save_dir=None,
-                energies=energies_list,
-                offset_data=offset_data,
-                target_element=self.target_element,
-                ref_element=self.ref_element,
-            )
-            for i, fig in enumerate(figs):
-                self._log_figure(trainer, fig, f"val/surface_stability_{i}")
-                plt.close(fig)
+            if len(self._val_sampled_atoms) == len(sampled_energies):
+                data_list = [
+                    {"atoms": a, "energy": float(sampled_energies[i]), "label": "VSSR-MC sample"}
+                    for i, a in enumerate(self._val_sampled_atoms)
+                ]
+                energies_list = [float(sampled_energies[i]) for i in range(len(self._val_sampled_atoms))]
+                figs = surf.plot_surface_stability(
+                    data_list,
+                    self.val_surface_chem_pots,
+                    save_dir=None,
+                    energies=energies_list,
+                    offset_data=offset_data,
+                    target_element=self.target_element,
+                    ref_element=self.ref_element,
+                )
+                for i, fig in enumerate(figs):
+                    self._log_figure(trainer, fig, f"val/surface_stability_{i}")
+                    plt.close(fig)
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        """Validation is orchestrated in VPDiffusion hooks."""
+        return
 
     def _log_figure(self, trainer: pl.Trainer, fig, key: str) -> None:
         buf = io.BytesIO()

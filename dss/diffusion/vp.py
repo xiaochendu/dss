@@ -34,12 +34,12 @@ class VPDiffusion(pl.LightningModule):
         loss_config={
             "energy_fn": nn.MSELoss(),
             "forces_fn": nn.MSELoss(),
-            "energy_weight": 0.01,
-            "forces_weight": 0.99,
+            "energy_weight": 0.0,
+            "forces_weight": 0.0,
         },
         optim_config={"lr": 1e-3},
         scheduler_config={"factor": 0.05, "patience": 20},
-        verbose=True,
+        verbose=False,
     ):
         """
         Args
@@ -254,14 +254,45 @@ class VPDiffusion(pl.LightningModule):
             The loss of the validation step.
 
         """
-        if self.potential_model is not None:
-            torch.set_grad_enabled(True)
-
-        losses = self.loss(batch, batch_idx)
+        # DSS validation remains loss-based on val batches.
+        # Full structure sampling/energy-composition evaluation is performed by
+        # SurfaceEvalCallback.on_validation_epoch_end.
+        # Validation loop is run under no_grad by Lightning, but potential/force
+        # evaluation needs autograd to compute response properties.
+        with torch.set_grad_enabled(True):
+            losses = self.loss(batch, batch_idx)
         batch_size = len(batch["_idx"])
         for k, v in losses.items():
-            self.log("val_" + k, v, batch_size=batch_size)
+            self.log(
+                "val_" + k,
+                v,
+                sync_dist=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+        # Run sampling/evaluation per validation step and accumulate outputs.
+        cb = getattr(self, "_surface_eval_callback", None)
+        if cb is not None and self.trainer is not None:
+            cb.run_validation_step(self.trainer, self, val_loss=float(losses["loss"].detach().cpu()))
         return losses["loss"]
+
+    def on_validation_epoch_start(self) -> None:
+        """Reset per-epoch validation accumulators in surface callback."""
+        cb = getattr(self, "_surface_eval_callback", None)
+        if cb is None or self.trainer is None:
+            return
+        cb.on_validation_epoch_start(self.trainer, self)
+
+    def on_validation_epoch_end(self) -> None:
+        """Finalize aggregated sampled validation metrics/plots via SurfaceEvalCallback."""
+        cb = getattr(self, "_surface_eval_callback", None)
+        if cb is None:
+            return
+        trainer = self.trainer
+        if trainer is None:
+            return
+        cb.finalize_validation_epoch(trainer, self)
 
     def configure_optimizers(self) -> Dict:
         """
@@ -280,8 +311,11 @@ class VPDiffusion(pl.LightningModule):
         )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": scheduler,
-            "monitor": "val_loss",
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss",
+                "strict": False,
+            },
         }
 
     def loss(self, batch: Dict, batch_idx: torch.Tensor) -> Dict:
@@ -351,8 +385,12 @@ class VPDiffusion(pl.LightningModule):
             noise[idx] = self.periodic_distance(xt[idx], noise[idx], cell)
 
         score_loss = torch.mean(torch.sum((noise + score * vars) ** 2, dim=-1))
-
-        if self.potential_model is None:
+        energy_weight = float(self.loss_config.get("energy_weight", 0.0))
+        forces_weight = float(self.loss_config.get("forces_weight", 0.0))
+        use_potential_loss = (
+            self.potential_model is not None and (energy_weight > 0.0 or forces_weight > 0.0)
+        )
+        if not use_potential_loss:
             return {"loss": score_loss}
 
         ### energy/force loss
@@ -363,14 +401,15 @@ class VPDiffusion(pl.LightningModule):
 
         # batch = self.preprocess_batch(batch, save_keys=[])
         outputs = self.potential_model(batch)
-        # energy
-        pot_loss = self.loss_config["energy_weight"] * self.loss_config["energy_fn"](
-            outputs["energy"], targets["energy"]
-        )
-        # forces
-        pot_loss += self.loss_config["forces_weight"] * self.loss_config["forces_fn"](
-            outputs["forces"], targets["forces"]
-        )
+        pot_loss = torch.zeros((), device=score_loss.device, dtype=score_loss.dtype)
+        if energy_weight > 0.0:
+            pot_loss = pot_loss + energy_weight * self.loss_config["energy_fn"](
+                outputs["energy"], targets["energy"]
+            )
+        if forces_weight > 0.0:
+            pot_loss = pot_loss + forces_weight * self.loss_config["forces_fn"](
+                outputs["forces"], targets["forces"]
+            )
 
         losses = {
             "loss": score_loss + pot_loss,
@@ -484,7 +523,11 @@ class VPDiffusion(pl.LightningModule):
 
         """
         batch = self.preprocess_batch(batch, save_keys=[])
-        self.potential_model(batch)
+        out = self.potential_model(batch)
+        if isinstance(out, dict):
+            for key in ("energy", "forces"):
+                if key in out:
+                    batch[key] = out[key]
         return batch
 
     def periodic_distance(
@@ -600,7 +643,7 @@ class VPDiffusion(pl.LightningModule):
         if num_steps == 0 and not save_traj:
             return batch
 
-        time_steps = torch.linspace(1, self.eps, num_steps)
+        time_steps = torch.linspace(1, self.eps, num_steps, device=self.device)
         step_size = time_steps[0] - time_steps[1]
         mask = batch.get(
             "mask", torch.zeros_like(batch[properties.R], dtype=torch.bool)
@@ -650,7 +693,8 @@ class VPDiffusion(pl.LightningModule):
                 noise_step[mask] = 0
 
                 batch[properties.R] = batch[properties.R] + noise_step
-                print(f"mean z at t={time}:", batch[properties.R][:, 2].mean())
+                if self.verbose:
+                    print(f"mean z at t={time}:", batch[properties.R][:, 2].mean())
 
             batch = self.batch_wrap(batch)
 
@@ -696,7 +740,6 @@ class VPDiffusion(pl.LightningModule):
         
         """
         assert self.potential_model is not None, "Potential model is not defined."
-
         batch = self.batch_random_positions(batch)
         if num_steps == 0:
             return batch

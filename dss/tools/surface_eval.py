@@ -18,12 +18,8 @@ logger = logging.getLogger(__name__)
 
 from collections import Counter
 
-from dss.data.constants.sto import (
-    STO_BULK_ENERGIES,
-    STO_REF_ELEMENT,
-    STO_REF_FORMULA,
-    STO_STOICS,
-)
+from dss.data.constants.sto import (STO_BULK_ENERGIES, STO_REF_ELEMENT,
+                                    STO_REF_FORMULA, STO_STOICS)
 
 
 def get_atom_counts(atoms: object) -> Counter:
@@ -443,12 +439,10 @@ def calculate_surface_energy(
 
     if offset_data is None:
         if "Ag" in counts and counts.get(STO_REF_ELEMENT, 0) == 0:
-            from dss.data.constants.agxoy import (
-                AGXOY_BULK_ENERGIES,
-                AGXOY_REF_ELEMENT,
-                AGXOY_REF_FORMULA,
-                AGXOY_STOICS,
-            )
+            from dss.data.constants.agxoy import (AGXOY_BULK_ENERGIES,
+                                                  AGXOY_REF_ELEMENT,
+                                                  AGXOY_REF_FORMULA,
+                                                  AGXOY_STOICS)
 
             bulk_energies_resolved = dict(AGXOY_BULK_ENERGIES)
             stoics = AGXOY_STOICS
@@ -573,12 +567,10 @@ def plot_surface_stability(
         )
     if offset_data is None:
         if ref_element == "Ag":
-            from dss.data.constants.agxoy import (
-                AGXOY_BULK_ENERGIES,
-                AGXOY_REF_ELEMENT,
-                AGXOY_REF_FORMULA,
-                AGXOY_STOICS,
-            )
+            from dss.data.constants.agxoy import (AGXOY_BULK_ENERGIES,
+                                                  AGXOY_REF_ELEMENT,
+                                                  AGXOY_REF_FORMULA,
+                                                  AGXOY_STOICS)
 
             offset_data = {
                 "bulk_energies": dict(AGXOY_BULK_ENERGIES),
@@ -587,12 +579,9 @@ def plot_surface_stability(
                 "ref_element": AGXOY_REF_ELEMENT,
             }
         else:
-            from dss.data.constants.sto import (
-                STO_BULK_ENERGIES,
-                STO_REF_ELEMENT,
-                STO_REF_FORMULA,
-                STO_STOICS,
-            )
+            from dss.data.constants.sto import (STO_BULK_ENERGIES,
+                                                STO_REF_ELEMENT,
+                                                STO_REF_FORMULA, STO_STOICS)
 
             offset_data = {
                 "bulk_energies": dict(STO_BULK_ENERGIES),

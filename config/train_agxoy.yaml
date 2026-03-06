@@ -1,49 +1,75 @@
-# DSS AgxOy training config (same dataset layout as snowyflow).
-# Override from CLI: python scripts/train.py --config config/train_agxoy.yaml --data_path /path/to/data
-# Or override in YAML and run: python scripts/train.py --config config/train_agxoy.yaml
+# ==============================================================================
+# RUN / OUTPUT LAYOUT (hydra-like)
+# ==============================================================================
+# Main root for this experiment family.
+run_root: "./outputs/agxoy"
+# Subdir template under run_root.
+# Supports CLI/config placeholders and {now:strftime} timestamp token.
+run_dir_template: "dss_nf${n_atom_basis}_nr${n_rbf}_bs${batch_size}_lr${lr}/${now:%Y-%m-%d_%H-%M-%S}"
 
-# Data
+# ==============================================================================
+# DATA
+# ==============================================================================
 data_path: null  # required; set via CLI or override
-mcmc_files: null # e.g. [agox_sample_AgxOy_2000.xyz]; null = glob agox_sample_AgxOy_*.xyz
-path: "dataset.db"
+val_data_path: null  # optional separate validation dataset directory; if set, val split is built from this path
+mcmc_files: null  # e.g. [agox_sample_AgxOy_2000.xyz]; null = glob agox_sample_AgxOy_*.xyz
+path: "dataset.db"  # DB filename/path (relative paths are placed in run dir)
 
-# Training
+# ==============================================================================
+# TRAINING
+# ==============================================================================
 batch_size: 32
 max_epochs: 100
+num_train: 1.0
+num_val: 0.0
+reuse_train_for_val: true  # keep validation loop active by reusing train split as val when num_val=0
 lr: 0.001
 limit_train_batches: null
 limit_val_batches: null
-# Run validation every N fraction of epoch (1.0 = every epoch; 0.5 = twice per epoch; 2.0 = every 2 epochs)
-val_check_interval: 1.0
+# Validation cadence: 1.0=every epoch, 0.5=twice/epoch, 2.0=every 2 epochs.
+# Preferred: run validation every N epochs.
+check_val_every_n_epoch: 1
+# Optional intra-epoch override (null disables). Examples: 0.5 => twice per epoch.
+val_check_interval: null
 
-# Model
+# ==============================================================================
+# MODEL
+# ==============================================================================
 cutoff: 6.0
 n_atom_basis: 64
 n_rbf: 30
 
-# DataLoader
+# ==============================================================================
+# DATALOADER
+# ==============================================================================
 num_workers: 0
 
-# Logging (Wandb)
-# wandb_project / wandb_run support {n_atom_basis}, {n_rbf}, {batch_size}, {lr}, {max_epochs}, etc. from this config
+# ==============================================================================
+# LOGGING / WANDB
+# ==============================================================================
 wandb: false
 wandb_project: "dss"
-wandb_run: "dss_agxoy_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}"
+wandb_run: "dss_agxoy_nf${n_atom_basis}_nr${n_rbf}_bs${batch_size}_lr${lr}"
+# If null, uses run dir (recommended so all artifacts share one main directory).
 wandb_dir: null
 
-# Surface eval (validation-time sampling + energy/composition metrics and plots)
-# When surface_eval: true, on fit start train energies are precomputed; each validation
-# samples structures and logs val/energy_*, val/composition_wasserstein, and figures.
-# Validation runs every epoch (Lightning default). With mace_model set, the callback
-# loads MACE in on_fit_start for train/sampled energies.
+# ==============================================================================
+# SURFACE EVAL (validation-time sampling + energy/composition metrics and plots)
+# ==============================================================================
 surface_eval: false
 val_sample_num_samples: 256
 val_sample_num_steps: 100
 val_sample_postrelax_steps: 0
-val_save_trajectories: false  # if true, save sampling trajectories as XYZ under val_trajectories_dir (one file per sample per epoch)
+val_use_regressor_guidance: false
+val_guidance_eta: 0.01
+# Optional explicit path to train_energies.pt; if null uses <run_dir>/train_energies.pt.
+train_energies_path: null
+val_save_trajectories: false
 val_trajectories_dir: "val_trajectories"
 
+# ==============================================================================
 # MACE (optional; used by surface eval when mace_model is set)
+# ==============================================================================
 mace_model: null  # path or URL to .model file; null = use potential_model for energies
 mace_head: "omat_pbe"
 mace_device: "cuda"

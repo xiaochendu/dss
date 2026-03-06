@@ -150,6 +150,7 @@ def get_diffusion_model(
     beta_min=1e-2,
     lr=1e-3,
     neighbour_list=None,
+    potential_model_instance=None,
 ):
     import schnetpack as spk
 
@@ -172,16 +173,19 @@ def get_diffusion_model(
         representation, time_dim=2, gated_blocks=gated_blocks
     )
 
-    pred_energy = spk.atomistic.Atomwise(
-        n_in=representation.n_atom_basis, output_key="energy"
-    )
-    pred_forces = spk.atomistic.Forces(energy_key="energy", force_key="forces")
-    pairwise_distance = spk.atomistic.PairwiseDistances()
-    potential = Potential(
-        representation=representation,
-        input_modules=[pairwise_distance],
-        output_modules=[pred_energy, pred_forces],
-    )
+    if potential_model_instance is not None:
+        potential = potential_model_instance
+    else:
+        pred_energy = spk.atomistic.Atomwise(
+            n_in=representation.n_atom_basis, output_key="energy"
+        )
+        pred_forces = spk.atomistic.Forces(energy_key="energy", force_key="forces")
+        pairwise_distance = spk.atomistic.PairwiseDistances()
+        potential = Potential(
+            representation=representation,
+            input_modules=[pairwise_distance],
+            output_modules=[pred_energy, pred_forces],
+        )
 
     diffusion = VPDiffusion(
         score_model=score_model,
@@ -267,7 +271,8 @@ def get_energies_for_atoms(diffusion, atoms_list, num_template, z_confinement, b
             data[prop.cell] = data["_cell"]
         if prop.pbc not in data and "_pbc" in data:
             data[prop.pbc] = data["_pbc"]
-        with torch.no_grad():
+        # Force-response heads in SchNetPack require autograd during forward.
+        with torch.set_grad_enabled(True):
             batch = diffusion.preprocess_batch(data, save_keys=[])
             out = diffusion.potential_model(batch)
         e = out["energy"]
@@ -280,9 +285,18 @@ def get_energies_for_atoms(diffusion, atoms_list, num_template, z_confinement, b
 
 
 def sample(
-        diffusion, num_samples, template, symbols, z_confinement, num_steps=1000, eta=1e-2, postrelax_steps=100,
-        return_trajectories=False,
+    diffusion,
+    num_samples,
+    template,
+    symbols,
+    z_confinement,
+    num_steps=1000,
+    eta=1e-2,
+    postrelax_steps=100,
+    return_trajectories=False,
+    use_regressor_guidance=False,
 ):
+    from collections import defaultdict
     import numpy as np
     import schnetpack as spk
     import torch
@@ -302,7 +316,8 @@ def sample(
                 e, f = b["energy"].cpu().item(), b["forces"].cpu().detach().numpy().reshape(-1, 3)
                 a.calc = SinglePointCalculator(a, energy=e, forces=f)
             except Exception:
-                print('No predicted energies and forces')
+                # Some intermediate trajectory frames may not carry e/f predictions.
+                pass
 
             atoms.append(a)
         return atoms
@@ -311,73 +326,117 @@ def sample(
     z_conf = torch.tensor(np.asarray(z_confinement), dtype=torch.float32, device=dev)
     if z_conf.dim() == 1:
         z_conf = z_conf.unsqueeze(0)
-    converter = spk.interfaces.AtomsConverter(
-        neighbor_list=None,
-        additional_inputs={
-            "mask": torch.tensor(
-                np.vstack(
-                    [
-                        np.ones((len(template), 3), dtype=bool),
-                        np.zeros((len(symbols), 3), dtype=bool),
-                    ]
-                ),
-                device=dev,
+
+    # Accept either:
+    # - symbols: list[str] (same composition for all samples)
+    # - symbols: list[list[str]] (per-sample composition)
+    if (
+        isinstance(symbols, (list, tuple))
+        and len(symbols) > 0
+        and isinstance(symbols[0], (list, tuple, np.ndarray))
+    ):
+        symbol_sets = [list(s) for s in symbols]
+        if len(symbol_sets) != num_samples:
+            raise ValueError(
+                f"len(symbols)={len(symbol_sets)} must equal num_samples={num_samples} for per-sample symbols."
+            )
+    else:
+        symbol_sets = [list(symbols)] * num_samples
+
+    n_split = 64 if num_samples > 64 else max(1, num_samples)
+    template_symbols = template.get_chemical_symbols()
+    template_positions = template.get_positions()
+    template_cell = template.get_cell()
+    template_pbc = template.get_pbc()
+
+    # Group by number of adsorbates so mask/converter shapes match.
+    groups = defaultdict(list)
+    for i, syms in enumerate(symbol_sets):
+        groups[len(syms)].append(i)
+
+    all_atoms = [None] * num_samples
+    all_atoms_trajs = [None] * num_samples if return_trajectories else None
+
+    for n_ads, indices in groups.items():
+        mask = torch.tensor(
+            np.vstack(
+                [
+                    np.ones((len(template), 3), dtype=bool),
+                    np.zeros((n_ads, 3), dtype=bool),
+                ]
             ),
-            "z_confinement": z_conf,
-        },
-        device=str(dev),
-    )
+            device=dev,
+        )
+        converter = spk.interfaces.AtomsConverter(
+            neighbor_list=None,
+            additional_inputs={"mask": mask, "z_confinement": z_conf},
+            device=str(dev),
+        )
 
-    # generate data
-    n_split = 64 if num_samples > 64 else num_samples
-
-    all_atoms = []
-    for i in range(num_samples // n_split):
-        atoms_data = []
-        for _ in range(n_split):
-            all_symbols = template.get_chemical_symbols() + symbols #["Ag"] * len(template) + symbols
-            positions = np.vstack(
-                (template.get_positions(), np.zeros((len(symbols), 3)))
-            )
-            atoms_data.append(
-                Atoms(
-                    all_symbols,
-                    positions=positions,
-                    cell=template.get_cell(),
-                    pbc=template.get_pbc(),
+        for start in range(0, len(indices), n_split):
+            chunk_indices = indices[start : start + n_split]
+            atoms_data = []
+            for idx in chunk_indices:
+                syms = symbol_sets[idx]
+                all_symbols = template_symbols + syms
+                positions = np.vstack((template_positions, np.zeros((len(syms), 3))))
+                atoms_data.append(
+                    Atoms(
+                        all_symbols,
+                        positions=positions,
+                        cell=template_cell,
+                        pbc=template_pbc,
+                    )
                 )
-            )
 
-        data = converter(atoms_data)
-        data["_pbc"] = data["_pbc"].view(-1)  # hack
+            data = converter(atoms_data)
+            data["_pbc"] = data["_pbc"].view(-1)  # hack
 
-        if return_trajectories:
-            batch, traj_batch = diffusion.regressor_guidance_sample(
-                data, num_steps=num_steps, save_traj=True, eta=eta, postrelax_steps=postrelax_steps,
-            )
+            if return_trajectories:
+                if use_regressor_guidance:
+                    batch, traj_batch = diffusion.regressor_guidance_sample(
+                        data,
+                        num_steps=num_steps,
+                        save_traj=True,
+                        eta=eta,
+                        postrelax_steps=postrelax_steps,
+                    )
+                else:
+                    batch, traj_batch = diffusion.sample(
+                        data,
+                        num_steps=num_steps,
+                        save_traj=True,
+                    )
 
-            # #save traj
-            all_trajs = [[] for _ in range(n_split)]
-            atoms_trajs = [[] for _ in range(n_split)]
-            for b in traj_batch:
-                batch_list = diffusion._split_batch(b)
-                for j, item in enumerate(batch_list):
-                    all_trajs[j].append(item)
+                chunk_trajs = [[] for _ in range(len(chunk_indices))]
+                for b in traj_batch:
+                    batch_list = diffusion._split_batch(b)
+                    for j, item in enumerate(batch_list):
+                        chunk_trajs[j].append(item)
+                for j, batch_list in enumerate(chunk_trajs):
+                    all_atoms_trajs[chunk_indices[j]] = to_atoms(batch_list)
+            else:
+                if use_regressor_guidance:
+                    batch = diffusion.regressor_guidance_sample(
+                        data,
+                        num_steps=num_steps,
+                        save_traj=False,
+                        eta=eta,
+                        postrelax_steps=postrelax_steps,
+                    )
+                else:
+                    batch = diffusion.sample(
+                        data,
+                        num_steps=num_steps,
+                        save_traj=False,
+                    )
 
-            for j, batch_list in enumerate(all_trajs):
-                atoms = to_atoms(batch_list)
-                atoms_trajs[j] = atoms
-        else:
-            batch = diffusion.regressor_guidance_sample(
-                data, num_steps=num_steps, save_traj=False, eta=eta, postrelax_steps=postrelax_steps
-            )
-
-        # save final
-        batch_list = diffusion._split_batch(batch, keep_ef=True)
-        atoms = to_atoms(batch_list)
-        all_atoms += atoms
+            # save final
+            batch_list = diffusion._split_batch(batch, keep_ef=True)
+            atoms = to_atoms(batch_list)
+            for j, a in enumerate(atoms):
+                all_atoms[chunk_indices[j]] = a
 
     if return_trajectories:
-        return all_atoms, atoms_trajs
-    else:
-        return all_atoms
+        return all_atoms, all_atoms_trajs
+    return all_atoms
