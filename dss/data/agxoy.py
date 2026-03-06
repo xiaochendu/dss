@@ -144,7 +144,7 @@ def get_dataset_agxoy(
                 )
             )
 
-    # Build property_list and atoms for schnetpack (template-based mask)
+        # Build property_list and atoms for schnetpack (template-based mask)
     property_list = []
     for a in data_atoms:
         e = a.get_potential_energy()
@@ -153,11 +153,20 @@ def get_dataset_agxoy(
         mask = np.zeros((n, 3), dtype=bool)
         mask[:num_template, :] = True
         mask[num_template:, :] = False
+        
+        # Calculate species counts for adsorbates
+        adsorbate_numbers = a.get_atomic_numbers()[num_template:]
+        # Ag is 47, O is 8
+        n_ag = np.sum(adsorbate_numbers == 47)
+        n_o = np.sum(adsorbate_numbers == 8)
+        species_counts = np.array([n_ag, n_o], dtype=np.float32)
+
         property_list.append({
             "energy": np.array([e], dtype=np.float32),
             "forces": f.astype(np.float32),
             "mask": mask,
             "z_confinement": np.array(z_confinement, dtype=np.float32),
+            "species_counts": species_counts,
         })
 
     # Create DB (remove existing so split is fresh)
@@ -180,6 +189,7 @@ def get_dataset_agxoy(
             "forces": "eV/Ang",
             "mask": None,
             "z_confinement": None,
+            "species_counts": None,
         },
     )
     dataset.add_systems(property_list, data_atoms)

@@ -170,8 +170,8 @@ class SurfaceEvalCallback(pl.Callback):
         val_save_trajectories: bool = False,
         val_trajectories_dir: str = "val_trajectories",
         val_surface_chem_pots: Optional[list[dict]] = None,
-        target_element: str = "Ag",
-        ref_element: str = "O",
+        target_element: str = "O",
+        ref_element: str = "Ag",
         data_type: str = "agxoy",
         mace_model: Optional[str] = None,
         mace_head: str = "omat_pbe",
@@ -416,17 +416,44 @@ class SurfaceEvalCallback(pl.Callback):
         ref = self._load_train_reference(trainer)
         if ref is None:
             return
+
         train_energies, train_symbol_lists, num_template = ref
         if len(self._val_sampled_energies) == 0:
             return
         sampled_energies = torch.cat(self._val_sampled_energies, dim=0)
+        sampled_symbol_lists = self._val_sampled_symbol_lists
+        sampled_atoms = self._val_sampled_atoms
+
+        # Snowyflow-style: optionally filter sampled structures by validation energy range.
+        if self.val_energy_range is not None and len(self.val_energy_range) == 2:
+            min_e, max_e = float(self.val_energy_range[0]), float(self.val_energy_range[1])
+            n_before = int(sampled_energies.numel())
+            mask = (sampled_energies >= min_e) & (sampled_energies <= max_e)
+            num_dropped = int((~mask).sum().item())
+            if num_dropped > 0:
+                keep_idx = torch.nonzero(mask, as_tuple=False).flatten().tolist()
+                sampled_energies = sampled_energies[mask]
+                sampled_symbol_lists = [sampled_symbol_lists[i] for i in keep_idx]
+                sampled_atoms = [sampled_atoms[i] for i in keep_idx]
+                if trainer.logger is not None:
+                    trainer.logger.log_metrics(
+                        {"val/fraction_out_of_energy_range": float(num_dropped) / float(max(n_before, 1))},
+                        step=trainer.global_step,
+                    )
+            if sampled_energies.numel() == 0:
+                if trainer.logger is not None:
+                    trainer.logger.log_metrics(
+                        {"val/warn_all_filtered_by_energy_range": 1.0},
+                        step=trainer.global_step,
+                    )
+                return
 
         # Compositions
         train_compositions = surf.compositions_from_symbol_lists(
             train_symbol_lists, [num_template] * len(train_symbol_lists), self.species_names
         )
         sampled_compositions = surf.compositions_from_symbol_lists(
-            self._val_sampled_symbol_lists, [num_template] * len(self._val_sampled_symbol_lists), self.species_names
+            sampled_symbol_lists, [num_template] * len(sampled_symbol_lists), self.species_names
         )
 
         energies_dict = {"Train": train_energies, "Sampled": sampled_energies}
@@ -464,24 +491,29 @@ class SurfaceEvalCallback(pl.Callback):
                 "ref_formula": AGXOY_REF_FORMULA,
                 "ref_element": AGXOY_REF_ELEMENT,
             }
-            if len(self._val_sampled_atoms) == len(sampled_energies):
+            if len(sampled_atoms) == len(sampled_energies):
                 data_list = [
                     {"atoms": a, "energy": float(sampled_energies[i]), "label": "VSSR-MC sample"}
-                    for i, a in enumerate(self._val_sampled_atoms)
+                    for i, a in enumerate(sampled_atoms)
                 ]
-                energies_list = [float(sampled_energies[i]) for i in range(len(self._val_sampled_atoms))]
-                figs = surf.plot_surface_stability(
-                    data_list,
-                    self.val_surface_chem_pots,
-                    save_dir=None,
-                    energies=energies_list,
-                    offset_data=offset_data,
-                    target_element=self.target_element,
-                    ref_element=self.ref_element,
-                )
-                for i, fig in enumerate(figs):
-                    self._log_figure(trainer, fig, f"val/surface_stability_{i}")
-                    plt.close(fig)
+                energies_list = [float(sampled_energies[i]) for i in range(len(sampled_atoms))]
+                try:
+                    figs = surf.plot_surface_stability(
+                        data_list,
+                        self.val_surface_chem_pots,
+                        save_dir=None,
+                        energies=energies_list,
+                        offset_data=offset_data,
+                        target_element=self.target_element,
+                        ref_element=self.ref_element,
+                    )
+                    for i, fig in enumerate(figs):
+                        self._log_figure(trainer, fig, f"val/surface_stability_{i}")
+                        plt.close(fig)
+                except Exception:
+                    # Keep other validation plots/metrics even if surface stability fails.
+                    if trainer.logger is not None:
+                        trainer.logger.log_metrics({"val/warn_surface_stability_failed": 1.0}, step=trainer.global_step)
 
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         """Validation is orchestrated in VPDiffusion hooks."""
@@ -491,12 +523,15 @@ class SurfaceEvalCallback(pl.Callback):
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
         buf.seek(0)
-        if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log"):
+        if hasattr(trainer.logger, "log_image"):
             try:
                 import wandb
-                if isinstance(trainer.logger.experiment, wandb.run):
-                    trainer.logger.experiment.log({key: wandb.Image(buf, format="png")}, step=trainer.global_step)
-                    return
+                trainer.logger.log_image(
+                    key=key,
+                    images=[wandb.Image(fig)],
+                    step=trainer.global_step,
+                )
+                return
             except Exception:
                 pass
         if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "add_figure"):

@@ -235,6 +235,27 @@ class VPDiffusion(pl.LightningModule):
         batch_size = len(batch["_idx"])
         for k, v in losses.items():
             self.log("train_" + k, v, batch_size=batch_size)
+        # Progress bar metrics (human-readable names).
+        self.log(
+            "train/loss",
+            losses["loss"],
+            prog_bar=True,
+            on_step=True,
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        energy_key = properties.energy
+        if energy_key in batch:
+            self.log(
+                "train/avg_energies",
+                batch[energy_key].float().mean(),
+                prog_bar=True,
+                on_step=True,
+                on_epoch=True,
+                batch_size=batch_size,
+                sync_dist=True,
+            )
         return losses["loss"]
 
     def validation_step(self, batch: Dict, batch_idx: torch.Tensor) -> torch.Tensor:

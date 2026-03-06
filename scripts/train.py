@@ -118,6 +118,8 @@ def main():
     p.add_argument("--val_sample_postrelax_steps", type=int, default=0, help="Postrelaxation time steps per validation sampling (default 0)")
     p.add_argument("--val_use_regressor_guidance", action="store_true", help="Use regressor_guidance_sample for validation sampling. Default uses VPDiffusion.sample (unguided).")
     p.add_argument("--val_guidance_eta", type=float, default=1e-2, help="Guidance strength eta for regressor_guidance_sample when enabled.")
+    p.add_argument("--val_energy_range", type=yaml.safe_load, default=None, help="Optional sampled-energy filter range for val metrics/plots, e.g. \"[-100,200]\"")
+    p.add_argument("--val_surface_chem_pots", type=yaml.safe_load, default=[], help="Surface stability chemical potentials, e.g. \"[{Ag:0.0,O:0.0},{Ag:-1.0,O:0.0}]\"")
     p.add_argument("--train_energies_path", type=str, default=None, help="Optional path to precomputed train_energies.pt for surface eval (if missing, it will be computed and saved there)")
     p.add_argument("--val_save_trajectories", action="store_true", help="Save validation sampling trajectories as XYZ (one multi-frame file per sample, under val_trajectories_dir)")
     p.add_argument("--val_trajectories_dir", type=str, default="val_trajectories", help="Subdir under log dir for trajectory XYZ files (default: val_trajectories)")
@@ -277,6 +279,7 @@ def main():
                 "mace_dispersion": args.mace_dispersion,
                 "mace_enable_cueq": args.mace_enable_cueq,
             }
+
         callbacks.append(
             SurfaceEvalCallback(
                 template_atoms=template_atoms,
@@ -288,6 +291,8 @@ def main():
                 val_sample_postrelax_steps=args.val_sample_postrelax_steps,
                 val_use_regressor_guidance=args.val_use_regressor_guidance,
                 val_guidance_eta=args.val_guidance_eta,
+                val_energy_range=args.val_energy_range,
+                val_surface_chem_pots=args.val_surface_chem_pots,
                 train_energies_path=args.train_energies_path,
                 val_save_trajectories=args.val_save_trajectories,
                 val_trajectories_dir=args.val_trajectories_dir,
