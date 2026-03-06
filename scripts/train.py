@@ -12,7 +12,7 @@ Examples:
         --wandb --wandb_project my_project --wandb_run agxoy_v1 --max_epochs 10
 
     # With surface eval (sample at validation, log energy/composition metrics and plots):
-    python scripts/train.py --data_path /path/to/data --surface_eval --val_sample_num_samples 256
+    python scripts/train.py --data_path /path/to/data --surface_eval --val_batch_size 256
 
 Wandb: Use --wandb to log to Weights & Biases. Set WANDB_ENTITY or log in with
     wandb login. By default W&B files are written to the run directory
@@ -24,6 +24,7 @@ Surface eval: Use --surface_eval to enable validation-time sampling and surface 
     for train and sampled energies. Requires the mace package.
 """
 import argparse
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -37,7 +38,8 @@ import yaml
 from dss import get_dataset_agxoy, get_diffusion_model
 from dss.callbacks import SurfaceEvalCallback
 from dss.data.constants.agxoy import mask_index
-from dss.data.constants.agxoy import number_to_element as agxoy_number_to_element
+from dss.data.constants.agxoy import \
+    number_to_element as agxoy_number_to_element
 from dss.energy.mace import MACEEnergyModel
 from dss.utils import TorchNeighborList
 
@@ -51,6 +53,8 @@ def _format_wandb_template(s: str, args) -> str:
     """If s contains '{...}' placeholders, format with args (e.g. {n_atom_basis}, {batch_size})."""
     if not s or "{" not in s:
         return s
+    # Support both "{var}" and "${var}" styles in config templates.
+    s = re.sub(r"\$\{([^}:]+)\}", r"{\1}", s)
     try:
         return s.format(**vars(args))
     except KeyError:
@@ -61,13 +65,14 @@ def _format_run_dir_template(template: str, args) -> str:
     """Format run dir template with args and {now:...} timestamp token."""
     if not template:
         return ""
-    out = _format_wandb_template(template, args)
+    out = template
     if "{now:" in out:
         i = out.find("{now:")
         j = out.find("}", i)
         if j != -1:
             dt_fmt = out[i + 5 : j]
             out = out[:i] + datetime.now().strftime(dt_fmt) + out[j + 1 :]
+    out = _format_wandb_template(out, args)
     return out
 
 
@@ -92,8 +97,14 @@ def main():
     p.add_argument("--limit_val_batches", type=int, default=None, help="If set, limit val batches per epoch")
     p.add_argument("--check_val_every_n_epoch", type=int, default=1, help="Run validation every N epochs (default: 1).")
     p.add_argument("--val_check_interval", type=float, default=None, help="Optional intra-epoch validation interval passed to Trainer (e.g. 0.5=twice/epoch). If unset, epoch-based scheduling is used.")
+    # Checkpointing (snowyflow-style)
+    p.add_argument("--checkpoint_monitor", type=str, default="val_loss", help="Metric to monitor for ModelCheckpoint")
+    p.add_argument("--checkpoint_mode", type=str, default="min", choices=["min", "max"], help="ModelCheckpoint mode")
+    p.add_argument("--checkpoint_save_top_k", type=int, default=1, help="Save top-k checkpoints by monitored metric")
+    p.add_argument("--checkpoint_save_last", action="store_true", default=True, help="Also save last checkpoint")
+    p.add_argument("--no_checkpoint_save_last", action="store_false", dest="checkpoint_save_last", help="Disable saving last checkpoint")
     # Wandb
-    p.add_argument("--wandb", action="store_true", help="Use Weights & Biases for logging")
+    p.add_argument("--wandb", action="store_true", help="Enable online Weights & Biases sync. If omitted, wandb runs in offline mode.")
     p.add_argument("--wandb_project", type=str, default="dss", help="Wandb project name")
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name (default: auto)")
     p.add_argument("--wandb_dir", type=str, default=None, help="Wandb save_dir override. If null, uses run dir.")
@@ -102,7 +113,7 @@ def main():
     p.add_argument("--run_dir_template", type=str, default="dss_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}/{now:%Y-%m-%d_%H-%M-%S}", help="Run subdir template under run_root. Supports arg placeholders and {now:strftime}.")
     # Surface eval (validation-time sampling + metrics)
     p.add_argument("--surface_eval", action="store_true", help="Enable surface eval callback (sample at val, log energy/composition metrics and plots)")
-    p.add_argument("--val_sample_num_samples", type=int, default=256, help="Number of structures to sample per validation for surface eval")
+    p.add_argument("--val_batch_size", type=int, default=256, help="Number of structures to sample per validation for surface eval")
     p.add_argument("--val_sample_num_steps", type=int, default=100, help="Diffusion time steps per validation sampling (default 100)")
     p.add_argument("--val_sample_postrelax_steps", type=int, default=0, help="Postrelaxation time steps per validation sampling (default 0)")
     p.add_argument("--val_use_regressor_guidance", action="store_true", help="Use regressor_guidance_sample for validation sampling. Default uses VPDiffusion.sample (unguided).")
@@ -176,7 +187,7 @@ def main():
             mcmc_xyz_files=args.mcmc_files,
             path=val_db_path,
             split_file=val_split_path,
-            batch_size=args.batch_size,
+            batch_size=args.val_batch_size,
             num_train=0.0,
             num_val=1.0,
             num_workers=args.num_workers,
@@ -186,7 +197,19 @@ def main():
         datamodule._val_dataset = val_dm.val_dataset
         datamodule._val_dataloader = None
     elif args.reuse_train_for_val:
-        datamodule._val_dataset = datamodule.train_dataset
+        val_dm, _,_ = get_dataset_agxoy(
+        args.data_path,
+        mcmc_xyz_files=args.mcmc_files,
+        path=db_path,
+        split_file=split_path,
+        batch_size=args.val_batch_size if args.val_batch_size is not None else args.batch_size,
+        num_train=0.0,
+        num_val=1.0,
+        num_workers=args.num_workers,   
+        cutoff=args.cutoff,
+        neighbour_list=neighbour_list,
+    )
+        datamodule._val_dataset = val_dm.val_dataset
         datamodule._val_dataloader = None
 
     # Optional centralized MACE initialization.
@@ -213,22 +236,36 @@ def main():
         potential_model_instance=mace_energy_model,
     )
 
-    # Logger: Wandb if requested, else default TensorBoard
-    logger = True
-    if args.wandb:
-        try:
-            from pytorch_lightning.loggers import WandbLogger
-        except ImportError:
-            raise ImportError("Wandb logging requires: pip install wandb")
-        wandb_save_dir = str(Path(args.wandb_dir).expanduser().resolve()) if args.wandb_dir else str(run_root)
-        logger = WandbLogger(
-            project=_format_wandb_template(args.wandb_project, args),
-            name=_format_wandb_template(args.wandb_run, args) or None,
-            save_dir=wandb_save_dir,
-        )
+    # Logger: always use WandbLogger; --wandb toggles online sync.
+    try:
+        from pytorch_lightning.loggers import WandbLogger
+    except ImportError:
+        raise ImportError("Wandb logging requires: pip install wandb")
+    wandb_save_dir = str(Path(args.wandb_dir).expanduser().resolve()) if args.wandb_dir else str(run_root)
+    logger = WandbLogger(
+        project=_format_wandb_template(args.wandb_project, args),
+        name=_format_wandb_template(args.wandb_run, args) or None,
+        save_dir=wandb_save_dir,
+        offline=not args.wandb,
+    )
 
     # Callbacks
     callbacks = []
+    from pytorch_lightning.callbacks import ModelCheckpoint
+
+    callbacks.append(
+        ModelCheckpoint(
+            monitor=args.checkpoint_monitor,
+            mode=args.checkpoint_mode,
+            save_top_k=args.checkpoint_save_top_k,
+            save_last=args.checkpoint_save_last,
+            dirpath=str(run_root / "checkpoints"),
+            filename="{epoch:02d}-val_loss-{val_loss:.4f}",
+            auto_insert_metric_name=False,
+            verbose=True,
+        )
+    )
+
     if args.surface_eval:
         mace_kwargs = {}
         if args.mace_model is not None:
@@ -246,7 +283,7 @@ def main():
                 z_confinement=z_confinement,
                 species_names=("Ag", "O"),
                 num_template=len(template_atoms),
-                val_sample_num_samples=args.val_sample_num_samples,
+                val_batch_size=args.val_batch_size,
                 val_sample_num_steps=args.val_sample_num_steps,
                 val_sample_postrelax_steps=args.val_sample_postrelax_steps,
                 val_use_regressor_guidance=args.val_use_regressor_guidance,

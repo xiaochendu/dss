@@ -21,3 +21,4 @@ dependencies:
     - torch-dftd
     # Re-pin ASE after mace-torch (mace-torch pulls ase>=3.26; we need <3.26 for schnetpack)
     - "ase>=3.21,<3.26"
+    - wandb

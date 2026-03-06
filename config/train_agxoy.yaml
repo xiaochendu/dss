@@ -5,7 +5,7 @@
 run_root: "./outputs/agxoy"
 # Subdir template under run_root.
 # Supports CLI/config placeholders and {now:strftime} timestamp token.
-run_dir_template: "dss_nf${n_atom_basis}_nr${n_rbf}_bs${batch_size}_lr${lr}/${now:%Y-%m-%d_%H-%M-%S}"
+run_dir_template: "dss_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}/{now:%Y-%m-%d_%H-%M-%S}"
 
 # ==============================================================================
 # DATA
@@ -31,6 +31,11 @@ limit_val_batches: null
 check_val_every_n_epoch: 1
 # Optional intra-epoch override (null disables). Examples: 0.5 => twice per epoch.
 val_check_interval: null
+# Model checkpointing (snowyflow-style)
+checkpoint_monitor: "val_loss"
+checkpoint_mode: "min"
+checkpoint_save_top_k: 1
+checkpoint_save_last: true
 
 # ==============================================================================
 # MODEL
@@ -47,9 +52,9 @@ num_workers: 0
 # ==============================================================================
 # LOGGING / WANDB
 # ==============================================================================
-wandb: false
+wandb: false  # false=offline/local wandb, true=online sync
 wandb_project: "dss"
-wandb_run: "dss_agxoy_nf${n_atom_basis}_nr${n_rbf}_bs${batch_size}_lr${lr}"
+wandb_run: "dss_agxoy_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}"
 # If null, uses run dir (recommended so all artifacts share one main directory).
 wandb_dir: null
 
@@ -57,7 +62,7 @@ wandb_dir: null
 # SURFACE EVAL (validation-time sampling + energy/composition metrics and plots)
 # ==============================================================================
 surface_eval: false
-val_sample_num_samples: 256
+val_batch_size: 256
 val_sample_num_steps: 100
 val_sample_postrelax_steps: 0
 val_use_regressor_guidance: false

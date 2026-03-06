@@ -274,7 +274,12 @@ class VPDiffusion(pl.LightningModule):
         # Run sampling/evaluation per validation step and accumulate outputs.
         cb = getattr(self, "_surface_eval_callback", None)
         if cb is not None and self.trainer is not None:
-            cb.run_validation_step(self.trainer, self, val_loss=float(losses["loss"].detach().cpu()))
+            cb.run_validation_step(
+                self.trainer,
+                self,
+                batch=batch,
+                val_loss=float(losses["loss"].detach().cpu()),
+            )
         return losses["loss"]
 
     def on_validation_epoch_start(self) -> None:
@@ -400,7 +405,10 @@ class VPDiffusion(pl.LightningModule):
         }
 
         # batch = self.preprocess_batch(batch, save_keys=[])
-        outputs = self.potential_model(batch)
+        if energy_weight > 0.0 or forces_weight > 0.0:
+            outputs = self.potential_model(batch)
+        else:
+            outputs = {}
         pot_loss = torch.zeros((), device=score_loss.device, dtype=score_loss.dtype)
         if energy_weight > 0.0:
             pot_loss = pot_loss + energy_weight * self.loss_config["energy_fn"](

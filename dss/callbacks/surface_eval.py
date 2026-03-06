@@ -162,7 +162,7 @@ class SurfaceEvalCallback(pl.Callback):
         z_confinement,
         species_names: tuple[str, ...] = ("Ag", "O"),
         num_template: Optional[int] = None,
-        val_sample_num_samples: int = 256,
+        val_batch_size: int = 256,
         val_sample_num_steps: int = 100,
         val_sample_postrelax_steps: int = 100,
         val_use_regressor_guidance: bool = False,
@@ -188,7 +188,7 @@ class SurfaceEvalCallback(pl.Callback):
         self.z_confinement = np.asarray(z_confinement, dtype=np.float32)
         self.species_names = species_names
         self.num_template = num_template if num_template is not None else len(template_atoms)
-        self.val_sample_num_samples = val_sample_num_samples
+        self.val_batch_size = val_batch_size
         self.val_sample_num_steps = val_sample_num_steps
         self.val_sample_postrelax_steps = val_sample_postrelax_steps
         self.val_use_regressor_guidance = val_use_regressor_guidance
@@ -333,6 +333,7 @@ class SurfaceEvalCallback(pl.Callback):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
+        batch: Optional[dict] = None,
         val_loss: Optional[float] = None,
     ) -> None:
         """Run one sampling/eval pass during a validation step and collect outputs."""
@@ -342,21 +343,24 @@ class SurfaceEvalCallback(pl.Callback):
         if ref is None:
             return
         _, train_symbol_lists, num_template = ref
+        val_symbol_lists = _batch_to_symbol_lists(batch, num_template) if batch is not None else []
         log_dir = self._log_dir(trainer)
+
 
         # Sample on each validation step (snowyflow-style accumulation)
         rng = np.random.default_rng(trainer.current_epoch * 100000 + self._val_step_idx)
         symbol_tails = _sample_symbol_tails_from_train(
-            train_symbol_lists or [],
+            val_symbol_lists or train_symbol_lists or [],
             num_template,
-            self.val_sample_num_samples,
+            self.val_batch_size,
             rng,
         )
+
         if symbol_tails:
-            symbols = symbol_tails  # per-sample compositions drawn from train distribution
+            symbols = symbol_tails  # per-sample compositions drawn from val distribution (fallback: train)
         else:
             symbols = _infer_sampling_symbols(
-                self.template_atoms, num_template, self._train_symbol_lists or []
+                self.template_atoms, num_template, val_symbol_lists or self._train_symbol_lists or []
             )
             if not symbols:
                 # Keep old fallback, but this is likely a slab-only setup.
@@ -365,9 +369,10 @@ class SurfaceEvalCallback(pl.Callback):
                     trainer.logger.log_metrics(
                         {"val/warn_no_mobile_symbols": 1.0}, step=trainer.global_step
                     )
+
         out = sample(
             pl_module,
-            self.val_sample_num_samples,
+            self.val_batch_size,
             self.template_atoms,
             symbols,
             self.z_confinement,
@@ -385,7 +390,7 @@ class SurfaceEvalCallback(pl.Callback):
                 log_dir,
                 self.val_trajectories_dir,
                 step_idx=self._val_step_idx,
-                start_idx=self._val_step_idx * self.val_sample_num_samples,
+                start_idx=self._val_step_idx * self.val_batch_size,
             )
         else:
             sampled_atoms = out
