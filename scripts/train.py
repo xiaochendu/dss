@@ -92,6 +92,7 @@ def main():
     p.add_argument("--cutoff", type=float, default=6.0, help="Cutoff for neighbour list (Ang)")
     p.add_argument("--n_atom_basis", type=int, default=64, help="Number of GNN (PaiNN) atom features")
     p.add_argument("--n_rbf", type=int, default=30, help="Number of radial basis functions")
+    p.add_argument("--n_interactions", type=int, default=4, help="Number of GNN interaction layers")
     p.add_argument("--num_workers", type=int, default=0, help="DataLoader num_workers (0 for stability)")
     p.add_argument("--limit_train_batches", type=int, default=None, help="If set, limit train batches per epoch (for quick test)")
     p.add_argument("--limit_val_batches", type=int, default=None, help="If set, limit val batches per epoch")
@@ -233,6 +234,7 @@ def main():
         cutoff=args.cutoff,
         n_atom_basis=args.n_atom_basis,
         n_rbf=args.n_rbf,
+        n_interactions=args.n_interactions,
         lr=args.lr,
         neighbour_list=neighbour_list,
         potential_model_instance=mace_energy_model,

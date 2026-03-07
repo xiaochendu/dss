@@ -2,7 +2,7 @@
 # RUN / OUTPUT LAYOUT (hydra-like)
 # ==============================================================================
 # Main root for this experiment family.
-run_root: "./outputs/agxoy"
+run_root: "/mnt/data0/dux/vssr_fm_working/outputs/agxoy"
 # Subdir template under run_root.
 # Supports CLI/config placeholders and {now:strftime} timestamp token.
 run_dir_template: "dss_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}/{now:%Y-%m-%d_%H-%M-%S}"
@@ -42,7 +42,8 @@ checkpoint_save_last: true
 # ==============================================================================
 cutoff: 6.0
 n_atom_basis: 64
-n_rbf: 30
+n_rbf: 20
+n_interactions: 3
 
 # ==============================================================================
 # DATALOADER
@@ -87,5 +88,5 @@ mace_model: null  # path or URL to .model file; null = use potential_model for e
 mace_head: "omat_pbe"
 mace_device: "cuda"
 mace_dtype: "float64"
-mace_dispersion: true
+mace_dispersion: false
 mace_enable_cueq: false

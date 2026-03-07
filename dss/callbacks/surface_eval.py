@@ -242,11 +242,11 @@ class SurfaceEvalCallback(pl.Callback):
         setattr(pl_module, "_surface_eval_callback", self)
         log_dir = self._log_dir(trainer)
         self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
+
         if self._train_energies_path.exists():
             data = torch.load(self._train_energies_path, weights_only=False)
             self._train_symbol_lists = data.get("symbol_lists", [])
             return
-
         use_mace = self._mace_model is not None or self._mace_config is not None
         use_potential = getattr(pl_module, "potential_model", None) is not None
         if not use_mace and not use_potential:
