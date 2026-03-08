@@ -244,9 +244,10 @@ class SurfaceEvalCallback(pl.Callback):
         self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
 
         if self._train_energies_path.exists():
-            data = torch.load(self._train_energies_path, weights_only=False)
-            self._train_symbol_lists = data.get("symbol_lists", [])
+            train_energies, metadata = surf.load_mace_energies(self._train_energies_path)
+            self._train_symbol_lists = metadata.get("symbol_lists", []) if metadata else []
             return
+
         use_mace = self._mace_model is not None or self._mace_config is not None
         use_potential = getattr(pl_module, "potential_model", None) is not None
         if not use_mace and not use_potential:
@@ -275,6 +276,15 @@ class SurfaceEvalCallback(pl.Callback):
             train_energies = surf.precompute_mace_energies(
                 train_atoms, self._mace_model, batch_size=self.energy_batch_size
             )
+
+            metadata = {
+                "model": self._mace_model._model_path,
+                "head": self._mace_model._head,
+                "dispersion": self._mace_model._dispersion,
+                "n_samples": len(train_energies),
+                "symbol_lists": train_symbol_lists,
+                "num_template": self.num_template,
+            }
         else:
             train_energies_list = []
             pl_module.eval()
@@ -292,12 +302,15 @@ class SurfaceEvalCallback(pl.Callback):
             pl_module.train()
             train_energies = torch.cat(train_energies_list, dim=0)
 
+            metadata = {
+                "n_samples": len(train_energies),
+                "symbol_lists": train_symbol_lists,
+                "num_template": self.num_template,
+            }
+
         self._train_symbol_lists = train_symbol_lists
-        self._train_energies_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {"energies": train_energies, "symbol_lists": train_symbol_lists, "num_template": self.num_template},
-            self._train_energies_path,
-        )
+        surf.save_mace_energies(train_energies, self._train_energies_path, metadata=metadata)
+
 
         for key, val in [
             ("precompute/train_energy_mean", train_energies.mean().item()),
@@ -315,10 +328,9 @@ class SurfaceEvalCallback(pl.Callback):
             self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
         if not self._train_energies_path.exists():
             return None
-        data = torch.load(self._train_energies_path, weights_only=False)
-        train_energies = data["energies"]
-        self._train_symbol_lists = data.get("symbol_lists", [])
-        num_template = data.get("num_template", self.num_template)
+        train_energies, metadata = surf.load_mace_energies(self._train_energies_path)
+        self._train_symbol_lists = metadata.get("symbol_lists", []) if metadata else []
+        num_template = metadata.get("num_template", self.num_template) if metadata else self.num_template
         return train_energies, self._train_symbol_lists, num_template
 
     def on_validation_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
@@ -456,8 +468,8 @@ class SurfaceEvalCallback(pl.Callback):
             sampled_symbol_lists, [num_template] * len(sampled_symbol_lists), self.species_names
         )
 
-        energies_dict = {"Train": train_energies, "Sampled": sampled_energies}
-        compositions_dict = {"Train": train_compositions, "Sampled": sampled_compositions}
+        energies_dict = {"Train": train_energies, "dss": sampled_energies}
+        compositions_dict = {"Train": train_compositions, "dss": sampled_compositions}
 
         # Scalar metrics
         metrics = surf.energy_comparison_metrics(energies_dict, compositions_dict)

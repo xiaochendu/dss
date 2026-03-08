@@ -108,6 +108,7 @@ def main():
     p.add_argument("--wandb", action="store_true", help="Enable online Weights & Biases sync. If omitted, wandb runs in offline mode.")
     p.add_argument("--wandb_project", type=str, default="dss", help="Wandb project name")
     p.add_argument("--wandb_run", type=str, default=None, help="Wandb run name (default: auto)")
+    p.add_argument("--wandb_id", type=str, default=None, help="Wandb run ID for resuming (default: None)")
     p.add_argument("--wandb_dir", type=str, default=None, help="Wandb save_dir override. If null, uses run dir.")
     # Run/output directory (hydra-like)
     p.add_argument("--run_root", type=str, default="./outputs/agxoy", help="Base output directory for this experiment family")
@@ -132,6 +133,7 @@ def main():
     p.add_argument("--mace_dispersion", action="store_true", default=True, help="MACE D3 dispersion (default: True)")
     p.add_argument("--no_mace_dispersion", action="store_false", dest="mace_dispersion", help="Disable MACE dispersion")
     p.add_argument("--mace_enable_cueq", action="store_true", default=False, help="MACE cuEquivariance (default: False)")
+    p.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint for resuming training (full state)")
     # Load config first so CLI overrides config file
     args_pre, _ = p.parse_known_args()
     if args_pre.config is not None:
@@ -246,12 +248,16 @@ def main():
     except ImportError:
         raise ImportError("Wandb logging requires: pip install wandb")
     wandb_save_dir = str(Path(args.wandb_dir).expanduser().resolve()) if args.wandb_dir else str(run_root)
-    logger = WandbLogger(
+    logger_kwargs = dict(
         project=_format_wandb_template(args.wandb_project, args),
         name=_format_wandb_template(args.wandb_run, args) or None,
         save_dir=wandb_save_dir,
         offline=not args.wandb,
     )
+    if args.wandb_id:
+        logger_kwargs["id"] = args.wandb_id
+        logger_kwargs["resume"] = "must"
+    logger = WandbLogger(**logger_kwargs)
 
     # Callbacks
     callbacks = []
@@ -318,7 +324,7 @@ def main():
     if args.val_check_interval is not None:
         trainer_kwargs["val_check_interval"] = args.val_check_interval
     trainer = pl.Trainer(**trainer_kwargs)
-    trainer.fit(diffusion, datamodule)
+    trainer.fit(diffusion, datamodule, ckpt_path=args.ckpt_path)
     print("Training finished. Template and z_confinement available for sampling.")
 
 

@@ -709,12 +709,20 @@ class VPDiffusion(pl.LightningModule):
 
                 idx = 0
                 xz = torch.zeros_like(Rz)
+                std = torch.sqrt(step_size) * disp
+                # Ensure standard deviation is positive and finite
+                std = torch.clamp(std, min=1e-6)
+                
                 for i, n in enumerate(batch["_n_atoms"]):
+                    z_min, z_max = z_confinement[i, 0], z_confinement[i, 1]
+                    # Clamp the mean to be within the truncation range to avoid numerical issues
+                    mu = torch.clamp(Rz[idx : (idx + n)], min=z_min, max=z_max)
+                    
                     xz[idx : (idx + n)] = TruncatedNormal(
-                        Rz[idx : (idx + n)],
-                        torch.sqrt(step_size) * disp,
-                        z_confinement[i, 0],
-                        z_confinement[i, 1],
+                        mu,
+                        std,
+                        z_min,
+                        z_max,
                     ).sample()
                     idx += n
 

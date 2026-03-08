@@ -24,7 +24,10 @@ def main():
     parser.add_argument("--o_min", type=int, default=2, help="Minimum O count")
     parser.add_argument("--o_max", type=int, default=5, help="Maximum O count")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples per composition")
+    parser.add_argument("--num_steps", type=int, default=100, help="Number of diffusion steps")
     parser.add_argument("--n_atom_basis", type=int, default=32, help="n_atom_basis for the score model")
+    parser.add_argument("--n_interactions", type=int, default=4, help="n_interactions for the score model")
+    parser.add_argument("--n_rbf", type=int, default=30, help="n_rbf for the score model")
     parser.add_argument("--z_conf_min", type=float, default=2.8613568, help="z_confinement minimum")
     parser.add_argument("--z_conf_max", type=float, default=6.49999996, help="z_confinement maximum")
     
@@ -49,6 +52,8 @@ def main():
     
     diffusion, _ = get_diffusion_model(
         n_atom_basis=args.n_atom_basis,
+        n_interactions=args.n_interactions,
+        n_rbf=args.n_rbf,
         potential_model_instance=mace_energy_model,
     )
     
@@ -76,7 +81,7 @@ def main():
                     template=template_atoms,
                     symbols=symbols,
                     z_confinement=z_confinement,
-                    num_steps=100,
+                    num_steps=args.num_steps,
                     return_trajectories=False
                 )
             
