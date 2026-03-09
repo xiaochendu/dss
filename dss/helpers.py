@@ -297,6 +297,7 @@ def sample(
     use_regressor_guidance=False,
 ):
     from collections import defaultdict
+
     import numpy as np
     import schnetpack as spk
     import torch

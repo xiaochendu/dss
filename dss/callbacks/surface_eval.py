@@ -4,6 +4,7 @@ Uses only dss.helpers, dss.tools.surface_eval, and dss.data.constants (no snowyf
 """
 
 import io
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,8 @@ from dss.data.constants.agxoy import (AGXOY_BULK_ENERGIES, AGXOY_REF_ELEMENT,
                                       AGXOY_REF_FORMULA, AGXOY_STOICS)
 from dss.helpers import get_energies_for_atoms, sample
 from dss.tools import surface_eval as surf
+
+logger = logging.getLogger(__name__)
 
 
 def _save_val_trajectories(
@@ -243,9 +246,24 @@ class SurfaceEvalCallback(pl.Callback):
         log_dir = self._log_dir(trainer)
         self._train_energies_path = self._train_energies_path_override or (log_dir / "train_energies.pt")
 
+        train_energies = None
         if self._train_energies_path.exists():
             train_energies, metadata = surf.load_mace_energies(self._train_energies_path)
             self._train_symbol_lists = metadata.get("symbol_lists", []) if metadata else []
+            self.num_template = metadata.get("num_template", self.num_template) if metadata else self.num_template
+            
+            # If symbol_lists missing from metadata, we need to re-scan training data
+            if not self._train_symbol_lists:
+                logger.info("symbol_lists missing from %s. Re-scanning training data...", self._train_energies_path)
+                dataloader = trainer.datamodule.train_dataloader()
+                self._train_symbol_lists = []
+                for batch in dataloader:
+                    self._train_symbol_lists.extend(_batch_to_symbol_lists(batch, self.num_template))
+                # Update the file with metadata if possible
+                metadata = metadata or {}
+                metadata["symbol_lists"] = self._train_symbol_lists
+                metadata["num_template"] = self.num_template
+                surf.save_mace_energies(train_energies, self._train_energies_path, metadata=metadata)
             return
 
         use_mace = self._mace_model is not None or self._mace_config is not None
@@ -261,9 +279,9 @@ class SurfaceEvalCallback(pl.Callback):
                 from dss.data.constants.agxoy import mask_index
                 from dss.data.constants.agxoy import \
                     number_to_element as agxoy_number_to_element
+                number_to_element = {k: v for k, v in agxoy_number_to_element.items() if k <= mask_index}
                 from dss.energy.mace import MACEEnergyModel
 
-                number_to_element = {k: v for k, v in agxoy_number_to_element.items() if k <= mask_index}
                 self._mace_model = MACEEnergyModel(
                     number_to_element=number_to_element,
                     **self._mace_config,

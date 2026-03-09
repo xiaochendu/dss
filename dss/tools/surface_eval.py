@@ -285,9 +285,27 @@ def energy_comparison_metrics(
         return np.asarray(x).flatten()
 
     train_e = to_np(energies_dict.get("Train", np.array([])))
-    sampled_e = to_np(energies_dict.get("Sampled", np.array([])))
+    
+    # Use the first key that is NOT 'Train' as the sampled distribution.
+    sampled_label = None
+    for label in energies_dict.keys():
+        if label != "Train":
+            sampled_label = label
+            break
+            
+    if sampled_label is None:
+        return {
+            "energy_wasserstein_pooled": 0.0,
+            "energy_wasserstein_mean_per_comp": 0.0,
+            "energy_mean_diff_pooled": 0.0,
+            "energy_mean_diff_mean_per_comp": 0.0,
+            "energy_std_ratio_pooled": 1.0,
+            "energy_std_ratio_mean_per_comp": 1.0,
+        }
+        
+    sampled_e = to_np(energies_dict.get(sampled_label, np.array([])))
     train_comp = compositions_dict.get("Train", [])
-    sampled_comp = compositions_dict.get("Sampled", [])
+    sampled_comp = compositions_dict.get(sampled_label, [])
 
     out: dict[str, float] = {}
 
@@ -322,7 +340,7 @@ def energy_comparison_metrics(
     std_ratio_per_comp: list[float] = []
     for comp, label_to_elist in comp_to_energies.items():
         train_list = label_to_elist.get("Train", [])
-        sampled_list = label_to_elist.get("Sampled", [])
+        sampled_list = label_to_elist.get(sampled_label, [])
         if not train_list or not sampled_list:
             continue
         at = np.array(train_list)

@@ -99,7 +99,7 @@ def main():
     p.add_argument("--check_val_every_n_epoch", type=int, default=1, help="Run validation every N epochs (default: 1).")
     p.add_argument("--val_check_interval", type=float, default=None, help="Optional intra-epoch validation interval passed to Trainer (e.g. 0.5=twice/epoch). If unset, epoch-based scheduling is used.")
     # Checkpointing (snowyflow-style)
-    p.add_argument("--checkpoint_monitor", type=str, default="val_loss", help="Metric to monitor for ModelCheckpoint")
+    p.add_argument("--checkpoint_monitor", type=str, default="val/energy_wasserstein_pooled", help="Metric to monitor for ModelCheckpoint")
     p.add_argument("--checkpoint_mode", type=str, default="min", choices=["min", "max"], help="ModelCheckpoint mode")
     p.add_argument("--checkpoint_save_top_k", type=int, default=1, help="Save top-k checkpoints by monitored metric")
     p.add_argument("--checkpoint_save_last", action="store_true", default=True, help="Also save last checkpoint")
@@ -270,7 +270,7 @@ def main():
             save_top_k=args.checkpoint_save_top_k,
             save_last=args.checkpoint_save_last,
             dirpath=str(run_root / "checkpoints"),
-            filename="{epoch:02d}-val_loss-{val_loss:.4f}",
+            filename="{epoch:02d}-val_wasserstein-{" + args.checkpoint_monitor + ":.4f}",
             auto_insert_metric_name=False,
             verbose=True,
         )
