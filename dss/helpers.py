@@ -151,10 +151,11 @@ def get_diffusion_model(
     lr=1e-3,
     neighbour_list=None,
     potential_model_instance=None,
+    mode="diffusion",
 ):
     import schnetpack as spk
 
-    from dss.diffusion import VPDiffusion
+    from dss.diffusion import ESSFlow
     from dss.models import ConditionedScoreModel, Potential
     from dss.utils import TorchNeighborList
 
@@ -187,7 +188,7 @@ def get_diffusion_model(
             output_modules=[pred_energy, pred_forces],
         )
 
-    diffusion = VPDiffusion(
+    diffusion = ESSFlow(
         score_model=score_model,
         potential_model=potential,
         neighbour_list=neighbour_list,
@@ -195,6 +196,7 @@ def get_diffusion_model(
         beta_min=beta_min,
         optim_config={"lr": lr},
         scheduler_config={"factor": 0.90, "patience": 100},
+        mode=mode,
     )
 
     return diffusion, neighbour_list
@@ -207,7 +209,7 @@ def get_energies_for_atoms(diffusion, atoms_list, num_template, z_confinement, b
     and potential_model, returns per-structure energies.
 
     Args:
-        diffusion: VPDiffusion module (must have potential_model).
+        diffusion: ESSFlow module (must have potential_model).
         atoms_list: List of ASE Atoms (same num_template each).
         num_template: Number of template (fixed) atoms per structure.
         z_confinement: (z_min, z_max) or array of shape (2,).

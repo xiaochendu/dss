@@ -491,12 +491,15 @@ class SurfaceEvalCallback(pl.Callback):
 
         # Scalar metrics
         metrics = surf.energy_comparison_metrics(energies_dict, compositions_dict)
+        batch_size_total = len(sampled_energies)
         for k, v in metrics.items():
-            trainer.logger.log_metrics({f"val/{k}": v}, step=trainer.global_step)
+            pl_module.log(f"val/{k}", v, batch_size=batch_size_total, sync_dist=True)
+        
         comp_w = surf.wasserstein_composition(train_compositions, sampled_compositions, use_first_species_only=True)
-        trainer.logger.log_metrics({"val/composition_wasserstein": comp_w}, step=trainer.global_step)
+        pl_module.log("val/composition_wasserstein", comp_w, batch_size=batch_size_total, sync_dist=True)
+        
         if len(self._val_losses) > 0:
-            trainer.logger.log_metrics({"val/loss_sample_mean": float(np.mean(self._val_losses))}, step=trainer.global_step)
+            pl_module.log("val/loss_sample_mean", float(np.mean(self._val_losses)), batch_size=batch_size_total, sync_dist=True)
 
         # Energy distribution figure
         fig = surf.plot_energy_distribution(

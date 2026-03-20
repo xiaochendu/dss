@@ -9,12 +9,14 @@ from schnetpack.data.loader import _atoms_collate_fn
 from schnetpack.transform import WrapPositions
 
 from dss.utils import OFFSET_LIST, TruncatedNormal
+from dss.utils.ot import solve_ot_assignment
 
 
-class VPDiffusion(pl.LightningModule):
+class ESSFlow(pl.LightningModule):
 
     """
-    Implements variance-preserving diffusion (VP-Diffusion) using a score model.
+    Implements equivariant structural sampling (ESS) using either
+    variance-preserving diffusion (VP-Diffusion) or Flow Matching (FM).
 
     """
 
@@ -22,6 +24,7 @@ class VPDiffusion(pl.LightningModule):
         self,
         score_model,
         neighbour_list,
+        mode="diffusion",  # "diffusion" or "flow_matching"
         potential_model=None,
         pairwise_distance=PairwiseDistances(),
         potential_head=True,
@@ -45,10 +48,13 @@ class VPDiffusion(pl.LightningModule):
         Args
         ______
         score_model: torch.nn.Module
-            A score model that takes a batch of data and outputs a score for each atom.
+            A model that takes a batch of data and outputs either a score or a velocity
+            for each atom depending on the mode.
         neighbour_list: schnetpack.atomistic.NeighbourList
             A neighbour list that takes a batch of data and outputs a neighbour list
             for each atom.
+        mode: str
+            The training objective: "diffusion" or "flow_matching".
         potential_model: torch.nn.Module
             A potential model that takes a batch of data and outputs the energy and
             forces for each atom.
@@ -73,10 +79,11 @@ class VPDiffusion(pl.LightningModule):
             A dictionary of configuration options for the learning rate scheduler.
 
         """
-        super(VPDiffusion, self).__init__()
+        super(ESSFlow, self).__init__()
         self.score_model = score_model
         self.neighbour_list = neighbour_list
         self.pairwise_distance = pairwise_distance
+        self.mode = mode
 
         self.wrap_positions = WrapPositions()
         self.beta_min = torch.tensor(beta_min)
@@ -109,7 +116,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate beta.
 
         Returns
-        _______
+_______
         beta: torch.Tensor
             The value of beta at time t.
 
@@ -127,7 +134,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate alpha.
 
         Returns
-        _______
+_______
         alpha: torch.Tensor
             The value of alpha at time t.
 
@@ -146,7 +153,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate the drift term.
 
         Returns
-        _______
+_______
         drift: torch.Tensor
             The drift term of the diffusion process.
         """
@@ -162,7 +169,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate the dispersion term.
 
         Returns
-        _______
+_______
         dispersion: torch.Tensor
             The dispersion term of the diffusion process.
         """
@@ -178,7 +185,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate the mean factor.
 
         Returns
-        _______
+_______
         mean_factor: torch.Tensor
             The mean factor of the diffusion process.
         """
@@ -194,7 +201,7 @@ class VPDiffusion(pl.LightningModule):
             The time at which to calculate the marginal probability.
 
         Returns
-        _______
+_______
         marginal_probability: torch.Tensor
             The marginal probability of the diffusion process.
         """
@@ -226,7 +233,7 @@ class VPDiffusion(pl.LightningModule):
             The index of the batch.
 
         Returns
-        _______
+_______
         loss: torch.Tensor
             The loss of the training step.
 
@@ -270,7 +277,7 @@ class VPDiffusion(pl.LightningModule):
             The index of the batch.
 
         Returns
-        _______
+_______
         loss: torch.Tensor
             The loss of the validation step.
 
@@ -325,7 +332,7 @@ class VPDiffusion(pl.LightningModule):
         Configures the optimizer and learning rate scheduler.
 
         Returns
-        _______
+_______
         optimizers: dict
             A dictionary of optimizers and learning rate schedulers.
 
@@ -356,11 +363,18 @@ class VPDiffusion(pl.LightningModule):
             The index of the batch.
 
         Returns
-        _______
+_______
         losses: dict
             A dictionary of losses.
 
         """
+        if self.mode == "flow_matching":
+            return self.loss_flow_matching(batch, batch_idx)
+        else:
+            return self.loss_diffusion(batch, batch_idx)
+
+    def loss_diffusion(self, batch: Dict, batch_idx: torch.Tensor) -> Dict:
+        """Score matching loss for VP-Diffusion."""
         ### score matching loss
         noised_batch = self.batch_clone(batch)
         mask = batch.get(
@@ -411,13 +425,55 @@ class VPDiffusion(pl.LightningModule):
             noise[idx] = self.periodic_distance(xt[idx], noise[idx], cell)
 
         score_loss = torch.mean(torch.sum((noise + score * vars) ** 2, dim=-1))
+        return self.add_potential_loss(score_loss, batch)
+
+    def loss_flow_matching(self, batch: Dict, batch_idx: torch.Tensor) -> Dict:
+        """Conditional Flow Matching loss (Optimal Transport interpolant)."""
+        noised_batch = self.batch_clone(batch)
+        mask = batch.get(
+            "mask", torch.zeros_like(batch[properties.R], dtype=torch.bool)
+        ).bool()
+
+        B = len(batch["_idx"])
+        t = torch.rand((B, 1), device=self.device)
+        t_nodes = t[batch["_idx_m"]]
+
+        # Prior distribution x0: random positions in cell
+        batch_x0 = self.batch_random_positions(self.batch_clone(batch))
+        x0 = batch_x0[properties.R]
+        x1 = batch[properties.R]
+
+        # Apply Optimal Transport assignment to x0 structure-by-structure
+        x0 = self.batch_ot_assignment(x0, x1, batch)
+
+        # Velocity target: x1 - x0 (Optimal Transport path)
+        ut = x1 - x0
+        # Periodic velocity adjustment
+        for i, cell in enumerate(batch["_cell"]):
+            idx = batch["_idx_m"] == i
+            ut[idx] = self.periodic_distance(x0[idx], ut[idx], cell)
+
+        # Interpolant: xt = (1-t)*x0 + t*x1
+        xt = (1 - t_nodes) * x0 + t_nodes * x1
+        noised_batch[properties.R] = xt
+        noised_batch = self.batch_wrap(noised_batch)
+
+        # Predict velocity
+        vt = self.forward(noised_batch, t_nodes, prob=self.train_prob)
+        vt[mask] = 0
+
+        fm_loss = torch.mean(torch.sum((vt - ut) ** 2, dim=-1))
+        return self.add_potential_loss(fm_loss, batch)
+
+    def add_potential_loss(self, base_loss: torch.Tensor, batch: Dict) -> Dict:
+        """Shared logic to add energy/force loss to the generative loss."""
         energy_weight = float(self.loss_config.get("energy_weight", 0.0))
         forces_weight = float(self.loss_config.get("forces_weight", 0.0))
         use_potential_loss = (
             self.potential_model is not None and (energy_weight > 0.0 or forces_weight > 0.0)
         )
         if not use_potential_loss:
-            return {"loss": score_loss}
+            return {"loss": base_loss}
 
         ### energy/force loss
         targets = {
@@ -425,12 +481,11 @@ class VPDiffusion(pl.LightningModule):
             "forces": batch[properties.forces],
         }
 
-        # batch = self.preprocess_batch(batch, save_keys=[])
         if energy_weight > 0.0 or forces_weight > 0.0:
             outputs = self.potential_model(batch)
         else:
             outputs = {}
-        pot_loss = torch.zeros((), device=score_loss.device, dtype=score_loss.dtype)
+        pot_loss = torch.zeros((), device=base_loss.device, dtype=base_loss.dtype)
         if energy_weight > 0.0:
             pot_loss = pot_loss + energy_weight * self.loss_config["energy_fn"](
                 outputs["energy"], targets["energy"]
@@ -441,8 +496,8 @@ class VPDiffusion(pl.LightningModule):
             )
 
         losses = {
-            "loss": score_loss + pot_loss,
-            "score_loss": score_loss,
+            "loss": base_loss + pot_loss,
+            "gen_loss": base_loss,
             "pot_loss": pot_loss,
         }
         return losses
@@ -469,9 +524,9 @@ class VPDiffusion(pl.LightningModule):
             The condition for the conditional model.
 
         Returns
-        _______
+_______
         score: torch.Tensor
-            The score.
+            The score or velocity.
 
         """
         if (
@@ -509,14 +564,11 @@ class VPDiffusion(pl.LightningModule):
             The condition for the conditional model.
 
         Returns
-        _______
+_______
         score: torch.Tensor
-            The score.ing
+            The score or velocity.
 
         """
-        # if self.potential_model is not None:
-        #     self.potential_model.initialize_derivatives(batch)
-
         if w is None:
             return self.forward(batch, t)
         else:
@@ -546,7 +598,7 @@ class VPDiffusion(pl.LightningModule):
             A batch of data.
 
         Returns
-        _______
+_______
         batch: dict
             The batch of data with the predicted energy and forces
 
@@ -576,7 +628,7 @@ class VPDiffusion(pl.LightningModule):
             The cell (3, 3)
 
         Returns
-        _______
+_______
         dist: torch.Tensor
             The distance between X and Y=X+N
         """
@@ -611,7 +663,7 @@ class VPDiffusion(pl.LightningModule):
             The keys to save in the batch
 
         Returns
-        _______
+_______
         batch: dict
             The batch of data with the calculated neighbourlist and pairwise
             distances between atoms
@@ -647,27 +699,22 @@ class VPDiffusion(pl.LightningModule):
         w: float = None,
         condition: torch.Tensor = None,
     ) -> Dict:
-        """
-        This implements the Euler-Maruyama method for sampling from a diffusion process.
+        """Dispatches to the correct sampler based on mode."""
+        if self.mode == "flow_matching":
+            return self.sample_flow_matching(batch, num_steps, save_traj, w, condition)
+        else:
+            return self.sample_diffusion(batch, num_steps, save_traj, w, condition)
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
-        num_steps: int
-            The number of steps to sample.
-        save_traj: bool
-            Whether to save the trajectory.
-        w: float
-            The weight of the conditional model.
-        condition: torch.Tensor
-            The condition for the conditional model.
-
-        Returns
-        _______
-        batch: dict
-            The batch of data with the sampled trajectory.
-        """
+    @torch.no_grad()
+    def sample_diffusion(
+        self,
+        batch: Dict,
+        num_steps: int = 1000,
+        save_traj: bool = False,
+        w: float = None,
+        condition: torch.Tensor = None,
+    ) -> Dict:
+        """ Euler-Maruyama for diffusion process. """
         batch = self.batch_random_positions(batch)
         if num_steps == 0 and not save_traj:
             return batch
@@ -738,6 +785,63 @@ class VPDiffusion(pl.LightningModule):
             if save_traj:
                 clone = self.batch_clone(batch)
                 clone["score"] = s
+                traj.append(clone)
+
+        if save_traj:
+            return batch, traj
+        else:
+            return batch
+
+    @torch.no_grad()
+    def sample_flow_matching(
+        self,
+        batch: Dict,
+        num_steps: int = 100,
+        save_traj: bool = False,
+        w: float = None,
+        condition: torch.Tensor = None,
+    ) -> Dict:
+        """Euler integration for Flow Matching ODE."""
+        batch = self.batch_random_positions(batch)
+        if num_steps == 0 and not save_traj:
+            return batch
+
+        # Flow Matching integration goes from t=0 to t=1
+        time_steps = torch.linspace(0, 1, num_steps, device=self.device)
+        dt = time_steps[1] - time_steps[0]
+        mask = batch.get(
+            "mask", torch.zeros_like(batch[properties.R], dtype=torch.bool)
+        ).bool()
+
+        if save_traj:
+            traj = [self.batch_clone(batch)]
+
+        for time in time_steps:
+            t = torch.ones((batch["_idx_m"].shape[0], 1), device=self.device) * time
+            vt = self.sample_forward(batch, t, w=w, condition=condition)
+            
+            x_step = dt * vt
+            x_step[mask] = 0
+            batch[properties.R] = batch[properties.R] + x_step
+            
+            # Surface specific: handle z confinement via clamping
+            if batch.get("z_confinement", None) is not None:
+                B = batch["_n_atoms"].shape[0]
+                z_confinement = batch["z_confinement"].view(B, 2)
+                Rz = batch[properties.R][:, 2]
+                idx = 0
+                for i, n in enumerate(batch["_n_atoms"]):
+                    z_min, z_max = z_confinement[i, 0], z_confinement[i, 1]
+                    batch[properties.R][idx : (idx + n), 2] = torch.clamp(
+                        Rz[idx : (idx + n)], min=z_min, max=z_max
+                    )
+                    idx += n
+
+            batch = self.batch_wrap(batch)
+
+            if save_traj:
+                clone = self.batch_clone(batch)
+                clone["velocity"] = vt
                 traj.append(clone)
 
         if save_traj:
@@ -911,6 +1015,47 @@ class VPDiffusion(pl.LightningModule):
 
     ### Utility Methods ###
 
+    def batch_ot_assignment(self, x0: torch.Tensor, x1: torch.Tensor, batch: Dict) -> torch.Tensor:
+        """Apply Optimal Transport assignment structure-by-structure in the batch."""
+        n_atoms = batch[properties.n_atoms]
+        idx_m = batch[properties.idx_m]
+        cells = batch[properties.cell]
+        atomic_numbers = batch[properties.Z]
+        
+        # mask is True for template (fixed), False for adsorbate (mobile)
+        # Note: VPSDiffusion defines mask this way.
+        mask = batch.get("mask", torch.zeros_like(x1, dtype=torch.bool)).bool()
+        
+        reordered_x0 = x0.clone()
+        idx_c = 0
+        for i, n in enumerate(n_atoms):
+            curr_slice = slice(idx_c, idx_c + n)
+            curr_mask = mask[curr_slice]
+            
+            # Adsorbate indices only (where mask[:, 0] is False)
+            # VPDiffusion uses mask[:, 0] == False for mobile atoms
+            ads_idx_in_struct = torch.where(~curr_mask[:, 0])[0]
+            
+            if len(ads_idx_in_struct) > 0:
+                ads_slice_global = torch.arange(idx_c, idx_c + n, device=self.device)[ads_idx_in_struct]
+                
+                curr_x0 = x0[ads_slice_global]
+                curr_x1 = x1[ads_slice_global]
+                curr_cell = cells[i]
+                curr_Z = atomic_numbers[ads_slice_global]
+                
+                reordered_curr_x0 = solve_ot_assignment(
+                    curr_x0,
+                    curr_x1,
+                    curr_cell,
+                    periodic=True,
+                    species_labels=curr_Z
+                )
+                reordered_x0[ads_slice_global] = reordered_curr_x0
+                
+            idx_c += n
+        return reordered_x0
+
     # Make decorator for batching functions like this
     def batch_wrap(self, batch: Dict) -> Dict:  
         """
@@ -922,7 +1067,7 @@ class VPDiffusion(pl.LightningModule):
             A batch of data.
 
         Returns
-        _______
+_______
         batch: dict
             A batch of data with wrapped atoms.
         
@@ -944,7 +1089,7 @@ class VPDiffusion(pl.LightningModule):
             A batch of data.
 
         Returns
-        _______
+_______
         batch: dict
             A batch of data with wrapped atoms.
         
@@ -968,7 +1113,7 @@ class VPDiffusion(pl.LightningModule):
             A list of properties to ignore.
 
         Returns
-        _______
+_______
         batch: dict
             A cloned batch of data.
         
@@ -985,12 +1130,12 @@ class VPDiffusion(pl.LightningModule):
         Randomizes the positions of atoms in a batch.
 
         Args
-        ______
+_______
         batch: dict
             A batch of data.
 
         Returns
-        _______
+_______
         batch: dict
             A batch of data with randomized positions.
         
@@ -1007,14 +1152,14 @@ class VPDiffusion(pl.LightningModule):
         Splits a batch of data into a list of batches.
 
         Args
-        ______
+_______
         batch: dict
             A batch of data.
         keep_ef: bool
             Whether to keep energy and forces.
 
         Returns
-        _______
+_______
         batch_list: list
             A list of batches.
         
@@ -1078,12 +1223,12 @@ class VPDiffusion(pl.LightningModule):
         Collates a list of batches into a single batch.
 
         Args
-        ______
+_______
         batch_list: list
             A list of batches.
 
         Returns
-        _______
+_______
         batch: dict
             A batch of data.
         
@@ -1096,12 +1241,12 @@ class VPDiffusion(pl.LightningModule):
         Randomizes the positions of atoms in a structure.
 
         Args
-        ______
+_______
         structure: dict
             A structure.
 
         Returns
-        _______
+_______
         structure: dict
             A structure with randomized positions.
         

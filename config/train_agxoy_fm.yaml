@@ -1,0 +1,91 @@
+# ==============================================================================
+# RUN / OUTPUT LAYOUT (hydra-like)
+# ==============================================================================
+# Main root for this experiment family.
+run_root: "/mnt/data0/dux/vssr_fm_working/outputs/agxoy"
+# Subdir template under run_root.
+run_dir_template: "dss_fm_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}/{now:%Y-%m-%d_%H-%M-%S}"
+
+# ==============================================================================
+# OBJECTIVE MODE
+# ==============================================================================
+mode: "flow_matching"  # "diffusion" or "flow_matching"
+
+# ==============================================================================
+# DATA
+# ==============================================================================
+data_path: null  # required; set via CLI or override
+val_data_path: null
+mcmc_files: null
+path: "dataset.db"
+
+# ==============================================================================
+# TRAINING
+# ==============================================================================
+batch_size: 32
+max_epochs: 100
+num_train: 1.0
+num_val: 0.0
+reuse_train_for_val: true
+lr: 0.001
+limit_train_batches: null
+limit_val_batches: null
+check_val_every_n_epoch: 5
+val_check_interval: null
+# Model checkpointing
+checkpoint_monitor: "val/energy_wasserstein_pooled"
+checkpoint_mode: "min"
+checkpoint_save_top_k: 1
+checkpoint_save_last: true
+
+# ==============================================================================
+# MODEL
+# ==============================================================================
+cutoff: 6.0
+n_atom_basis: 64
+n_rbf: 20
+n_interactions: 3
+
+# ==============================================================================
+# DATALOADER
+# ==============================================================================
+num_workers: 0
+
+# ==============================================================================
+# LOGGING / WANDB
+# ==============================================================================
+wandb: false
+wandb_project: "dss"
+wandb_run: "dss_fm_agxoy_nf{n_atom_basis}_nr{n_rbf}_bs{batch_size}_lr{lr}"
+wandb_dir: null
+
+# ==============================================================================
+# SURFACE EVAL (validation-time sampling + energy/composition metrics and plots)
+# ==============================================================================
+surface_eval: true
+val_batch_size: 256
+val_sample_num_steps: 100
+val_sample_postrelax_steps: 0
+val_use_regressor_guidance: false
+val_guidance_eta: 0.01
+val_energy_range: [-100, 200]
+val_surface_chem_pots:
+  - Ag: 0.0
+    O: 0.0
+  - Ag: -1.0
+    O: 0.0
+  - Ag: -2.0
+    O: 0.0
+train_energies_path: null
+val_save_trajectories: false
+val_trajectories_dir: "val_trajectories"
+
+# ==============================================================================
+# MACE (optional; used by surface eval when mace_model is set)
+# ==============================================================================
+mace_model: "medium"
+mace_head: "omat_pbe"
+mace_device: "cuda:0"
+mace_dtype: "float32"
+mace_dispersion: false
+mace_enable_cueq: false

@@ -134,6 +134,7 @@ def main():
     p.add_argument("--no_mace_dispersion", action="store_false", dest="mace_dispersion", help="Disable MACE dispersion")
     p.add_argument("--mace_enable_cueq", action="store_true", default=False, help="MACE cuEquivariance (default: False)")
     p.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint for resuming training (full state)")
+    p.add_argument("--mode", type=str, default="diffusion", choices=["diffusion", "flow_matching"], help="Generative objective mode.")
     # Load config first so CLI overrides config file
     args_pre, _ = p.parse_known_args()
     if args_pre.config is not None:
@@ -240,6 +241,7 @@ def main():
         lr=args.lr,
         neighbour_list=neighbour_list,
         potential_model_instance=mace_energy_model,
+        mode=args.mode,
     )
 
     # Logger: always use WandbLogger; --wandb toggles online sync.
