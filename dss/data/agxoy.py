@@ -19,17 +19,8 @@ from dss.utils import TorchNeighborList
 
 
 def _read_mcmc_xyz(xyz_file: Path) -> list:
-    """Load structures from a multi-frame XYZ; deduplicate by (len, positions)."""
-    atoms_list_full = ase_io.read(str(xyz_file), index=":")
-    atoms_list = []
-    for atoms in atoms_list_full:
-        for atoms_compare in atoms_list:
-            if len(atoms) == len(atoms_compare):
-                if np.allclose(atoms.get_positions(), atoms_compare.get_positions()):
-                    break
-        else:
-            atoms_list.append(atoms)
-    return atoms_list
+    """Load all structures from a multi-frame XYZ file."""
+    return ase_io.read(str(xyz_file), index=":")
 
 
 def _match_system(atoms, template_atoms_dict: dict) -> str:

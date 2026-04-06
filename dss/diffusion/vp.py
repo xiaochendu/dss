@@ -733,6 +733,8 @@ _______
             disp = self.dispersion(time)
 
             s = self.sample_forward(batch, t, w=w, condition=condition)
+            # Guard against NaN/inf in score output before it propagates into positions
+            s = torch.nan_to_num(s, nan=0.0, posinf=0.0, neginf=0.0)
 
             drift = disp**2 * s - self.forward_drift(batch[properties.R], t)
             noise = torch.randn_like(batch[properties.R])
@@ -762,8 +764,10 @@ _______
                 
                 for i, n in enumerate(batch["_n_atoms"]):
                     z_min, z_max = z_confinement[i, 0], z_confinement[i, 1]
-                    # Clamp the mean to be within the truncation range to avoid numerical issues
-                    mu = torch.clamp(Rz[idx : (idx + n)], min=z_min, max=z_max)
+                    mu = Rz[idx : (idx + n)]
+                    # Replace NaN positions with midpoint before clamping (NaN from score instability)
+                    mu = torch.nan_to_num(mu, nan=float((z_min + z_max) / 2))
+                    mu = torch.clamp(mu, min=z_min, max=z_max)
                     
                     xz[idx : (idx + n)] = TruncatedNormal(
                         mu,
