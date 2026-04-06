@@ -84,7 +84,7 @@ val_trajectories_dir: "val_trajectories"
 # ==============================================================================
 # MACE (optional; used by surface eval when mace_model is set)
 # ==============================================================================
-mace_model: null  # path or URL to .model file; null = use potential_model for energies
+mace_model: "medium"  # path or URL to .model file; null = use potential_model for energies
 mace_head: "omat_pbe"
 mace_device: "cuda"
 mace_dtype: "float64"
