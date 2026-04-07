@@ -100,6 +100,7 @@ def main():
     p.add_argument("--val_check_interval", type=float, default=None, help="Optional intra-epoch validation interval passed to Trainer (e.g. 0.5=twice/epoch). If unset, epoch-based scheduling is used.")
     # Checkpointing (snowyflow-style)
     p.add_argument("--checkpoint_monitor", type=str, default="val/energy_wasserstein_pooled", help="Metric to monitor for ModelCheckpoint")
+    p.add_argument("--scheduler_monitor", type=str, default="val/energy_wasserstein_pooled", help="Metric for ReduceLROnPlateau to monitor (default: matches checkpoint_monitor)")
     p.add_argument("--checkpoint_mode", type=str, default="min", choices=["min", "max"], help="ModelCheckpoint mode")
     p.add_argument("--checkpoint_save_top_k", type=int, default=1, help="Save top-k checkpoints by monitored metric")
     p.add_argument("--checkpoint_save_last", action="store_true", default=True, help="Also save last checkpoint")
@@ -242,6 +243,7 @@ def main():
         neighbour_list=neighbour_list,
         potential_model_instance=mace_energy_model,
         mode=args.mode,
+        scheduler_monitor=args.scheduler_monitor,
     )
 
     # Logger: always use WandbLogger; --wandb toggles online sync.

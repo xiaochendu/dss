@@ -42,6 +42,7 @@ class ESSFlow(pl.LightningModule):
         },
         optim_config={"lr": 1e-3},
         scheduler_config={"factor": 0.05, "patience": 20},
+        scheduler_monitor="val_loss",
         verbose=False,
     ):
         """
@@ -102,6 +103,7 @@ class ESSFlow(pl.LightningModule):
         self.condition_config = condition_config
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
+        self.scheduler_monitor = scheduler_monitor
         self.verbose = verbose
 
     ### Diffusion Methods ###
@@ -346,7 +348,7 @@ _______
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val_loss",
+                "monitor": self.scheduler_monitor,
                 "strict": False,
             },
         }
