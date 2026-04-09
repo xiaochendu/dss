@@ -40,9 +40,8 @@ class ESSFlow(pl.LightningModule):
             "energy_weight": 0.0,
             "forces_weight": 0.0,
         },
-        optim_config={"lr": 1e-3},
-        scheduler_config={"factor": 0.05, "patience": 20},
-        scheduler_monitor="val_loss",
+        optim_config={"lr": 3e-4},
+        scheduler_config={"step_size": 1000, "gamma": 0.995},
         verbose=False,
     ):
         """
@@ -103,7 +102,6 @@ class ESSFlow(pl.LightningModule):
         self.condition_config = condition_config
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
-        self.scheduler_monitor = scheduler_monitor
         self.verbose = verbose
 
     ### Diffusion Methods ###
@@ -341,15 +339,14 @@ _______
 
         """
         optimizer = torch.optim.Adam(self.parameters(), **self.optim_config)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, **self.scheduler_config
         )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": self.scheduler_monitor,
-                "strict": False,
+                "interval": "step",
             },
         }
 

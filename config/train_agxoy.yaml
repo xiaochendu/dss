@@ -72,10 +72,10 @@ val_energy_range: [-100, 200]
 val_surface_chem_pots:
   - Ag: 0.0
     O: 0.0
-  - Ag: -1.0
-    O: 0.0
-  - Ag: -2.0
-    O: 0.0
+  - Ag: 0.0
+    O: -1.0
+  - Ag: 0.0
+    O: -2.0
 # Optional explicit path to train_energies.pt; if null uses <run_dir>/train_energies.pt.
 train_energies_path: null
 val_save_trajectories: false

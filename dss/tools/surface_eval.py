@@ -397,7 +397,7 @@ def calculate_surface_energy(
 
     if offset_data is None:
         if "Ag" in counts and counts.get(STO_REF_ELEMENT, 0) == 0:
-            from snowyflow.data.constants.agxoy import (
+            from dss.data.constants.agxoy import (
                 AGXOY_BULK_ENERGIES,
                 AGXOY_REF_ELEMENT,
                 AGXOY_REF_FORMULA,
@@ -409,13 +409,8 @@ def calculate_surface_energy(
             ref_formula = AGXOY_REF_FORMULA
             ref_element_resolved = AGXOY_REF_ELEMENT
         else:
-            from dss.data.constants.sto import (
-                STO_BULK_ENERGIES,
-                STO_REF_ELEMENT,
-                STO_REF_FORMULA,
-                STO_STOICS,
-            )
-
+            # STO_REF_ELEMENT already imported at module level — don't re-import
+            # locally or Python will treat it as a local variable throughout the function
             bulk_energies_resolved = dict(STO_BULK_ENERGIES)
             stoics = STO_STOICS
             ref_formula = STO_REF_FORMULA
@@ -450,6 +445,31 @@ def calculate_surface_energy(
     return surf_en
 
 
+def calculate_surface_energies_agxoy(
+    symbol_lists: list[list[str]],
+    energies: np.ndarray,
+    chem_pots: dict[str, float] | None = None,
+) -> np.ndarray:
+    """Vectorized AgxOy surface energy: Ω = E − n_Ag·E_Ag_bulk − n_O·(E_O_ref + Δμ_O).
+
+    Ag is the reference element, so its chemical potential is implicitly fixed to bulk
+    (n_Ag × E_Ag_bulk). Only chem_pots["O"] enters the result; chem_pots["Ag"] is ignored.
+
+    Args:
+        symbol_lists: per-structure chemical-symbol lists (template + adsorbate atoms).
+        energies:     MACE total energies, shape (N,).
+        chem_pots:    deviation dict, e.g. {"Ag": 0.0, "O": -0.5}.  Defaults to μ=0.
+    """
+    from dss.data.constants.agxoy import AGXOY_BULK_ENERGIES
+
+    e_ag = AGXOY_BULK_ENERGIES["Ag"]
+    e_o = AGXOY_BULK_ENERGIES["O"]
+    mu_O = chem_pots.get("O", 0.0) if chem_pots else 0.0
+    n_ag = np.array([syms.count("Ag") for syms in symbol_lists])
+    n_o = np.array([syms.count("O") for syms in symbol_lists])
+    return np.asarray(energies).flatten() - n_ag * e_ag - n_o * (e_o + mu_O)
+
+
 def calculate_excess(
     atoms: object,
     target_element: str = "Sr",
@@ -459,7 +479,7 @@ def calculate_excess(
     """Calculate excess of target element relative to reference element."""
     if stoics is None:
         if ref_element == "Ag":
-            from snowyflow.data.constants.agxoy import AGXOY_STOICS
+            from dss.data.constants.agxoy import AGXOY_STOICS
             stoics = AGXOY_STOICS
         else:
             from dss.data.constants.sto import STO_STOICS
@@ -494,7 +514,7 @@ def plot_surface_stability(
         )
     if offset_data is None:
         if ref_element == "Ag":
-            from snowyflow.data.constants.agxoy import (
+            from dss.data.constants.agxoy import (
                 AGXOY_BULK_ENERGIES,
                 AGXOY_REF_ELEMENT,
                 AGXOY_REF_FORMULA,

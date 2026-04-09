@@ -88,7 +88,8 @@ def main():
     p.add_argument("--num_val", type=float, default=0.1, help="Fraction for validation")
     p.add_argument("--reuse_train_for_val", action="store_true", help="Reuse training split as validation dataset (useful with num_train=1.0 while keeping validation hooks/callbacks active).")
     p.add_argument("--max_epochs", type=int, default=100, help="Max training epochs")
-    p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    p.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    p.add_argument("--gradient_clip_val", type=float, default=10.0, help="Gradient clipping value (0 = disabled)")
     p.add_argument("--cutoff", type=float, default=6.0, help="Cutoff for neighbour list (Ang)")
     p.add_argument("--n_atom_basis", type=int, default=64, help="Number of GNN (PaiNN) atom features")
     p.add_argument("--n_rbf", type=int, default=30, help="Number of radial basis functions")
@@ -100,7 +101,6 @@ def main():
     p.add_argument("--val_check_interval", type=float, default=None, help="Optional intra-epoch validation interval passed to Trainer (e.g. 0.5=twice/epoch). If unset, epoch-based scheduling is used.")
     # Checkpointing (snowyflow-style)
     p.add_argument("--checkpoint_monitor", type=str, default="val/energy_wasserstein_pooled", help="Metric to monitor for ModelCheckpoint")
-    p.add_argument("--scheduler_monitor", type=str, default="val/energy_wasserstein_pooled", help="Metric for ReduceLROnPlateau to monitor (default: matches checkpoint_monitor)")
     p.add_argument("--checkpoint_mode", type=str, default="min", choices=["min", "max"], help="ModelCheckpoint mode")
     p.add_argument("--checkpoint_save_top_k", type=int, default=1, help="Save top-k checkpoints by monitored metric")
     p.add_argument("--checkpoint_save_last", action="store_true", default=True, help="Also save last checkpoint")
@@ -243,7 +243,6 @@ def main():
         neighbour_list=neighbour_list,
         potential_model_instance=mace_energy_model,
         mode=args.mode,
-        scheduler_monitor=args.scheduler_monitor,
     )
 
     # Logger: always use WandbLogger; --wandb toggles online sync.
@@ -324,6 +323,7 @@ def main():
         limit_train_batches=args.limit_train_batches,
         limit_val_batches=args.limit_val_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
+        gradient_clip_val=args.gradient_clip_val if args.gradient_clip_val > 0 else None,
     )
     if args.val_check_interval is not None:
         trainer_kwargs["val_check_interval"] = args.val_check_interval

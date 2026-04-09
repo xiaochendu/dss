@@ -486,35 +486,106 @@ class SurfaceEvalCallback(pl.Callback):
             sampled_symbol_lists, [num_template] * len(sampled_symbol_lists), self.species_names
         )
 
-        energies_dict = {"Train": train_energies, "dss": sampled_energies}
-        compositions_dict = {"Train": train_compositions, "dss": sampled_compositions}
+        energies_dict = {"Train": train_energies, "Sampled": sampled_energies}
+        compositions_dict = {"Train": train_compositions, "Sampled": sampled_compositions}
 
         # Scalar metrics
         metrics = surf.energy_comparison_metrics(energies_dict, compositions_dict)
         batch_size_total = len(sampled_energies)
         for k, v in metrics.items():
             pl_module.log(f"val/{k}", v, batch_size=batch_size_total, sync_dist=True)
-        
+
         comp_w = surf.wasserstein_composition(train_compositions, sampled_compositions, use_first_species_only=True)
         pl_module.log("val/composition_wasserstein", comp_w, batch_size=batch_size_total, sync_dist=True)
-        
+
         if len(self._val_losses) > 0:
             pl_module.log("val/loss_sample_mean", float(np.mean(self._val_losses)), batch_size=batch_size_total, sync_dist=True)
+
+        # Collect all figures into val_media dict for batched W&B logging
+        # (avoids duplicate panels by logging all images at the same step)
+        val_media: dict = {}
+        try:
+            import wandb
+            use_wandb = hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "log")
+        except ImportError:
+            use_wandb = False
 
         # Energy distribution figure
         fig = surf.plot_energy_distribution(
             {k: v.numpy() if isinstance(v, torch.Tensor) else v for k, v in energies_dict.items()},
             title="Energy distribution (Train vs Sampled)",
         )
-        self._log_figure(trainer, fig, "val/energy_distribution")
+        if use_wandb:
+            val_media["val/energy_distribution"] = wandb.Image(fig)
+        else:
+            self._log_figure_fallback(trainer, fig, "val/energy_distribution")
         plt.close(fig)
 
         # Energy per composition figure
         fig = surf.plot_energy_per_composition(
             energies_dict, compositions_dict, title="Energy by composition (Train vs Sampled)"
         )
-        self._log_figure(trainer, fig, "val/energy_per_composition")
+        if use_wandb:
+            val_media["val/energy_per_composition"] = wandb.Image(fig)
+        else:
+            self._log_figure_fallback(trainer, fig, "val/energy_per_composition")
         plt.close(fig)
+
+        # Surface energy at μ=0: distribution + per-composition + Wasserstein
+        if self.data_type == "agxoy" and train_compositions and sampled_compositions:
+            try:
+                from scipy.stats import wasserstein_distance as _wass_dist
+
+                mu_zero = {"Ag": 0.0, "O": 0.0}
+                # Compute surface energies using full symbol lists (template + adsorbate).
+                # Using adsorbate-only composition would miss the template bulk energy contribution
+                # (16 Ag × -2.825 eV ≈ +45 eV error in absolute surface energy values).
+                sampled_e_np = sampled_energies.numpy() if isinstance(sampled_energies, torch.Tensor) else sampled_energies
+                surf_e_sampled = surf.calculate_surface_energies_agxoy(
+                    sampled_symbol_lists, sampled_e_np, mu_zero
+                )
+                surf_energies_dict = {"Sampled": surf_e_sampled}
+                adsorbate_comps_dict = {"Sampled": sampled_compositions}
+
+                # Compute surface energies for train
+                train_e_np = train_energies.numpy() if isinstance(train_energies, torch.Tensor) else train_energies
+                if len(train_symbol_lists) == len(train_e_np):
+                    surf_e_train = surf.calculate_surface_energies_agxoy(
+                        train_symbol_lists, train_e_np, mu_zero
+                    )
+                    surf_energies_dict["Train"] = surf_e_train
+                    adsorbate_comps_dict["Train"] = train_compositions
+
+                    # Log Wasserstein distance on surface energies
+                    se_wass = float(_wass_dist(surf_e_train, surf_e_sampled))
+                    pl_module.log("val/surface_energy_wasserstein", se_wass, batch_size=batch_size_total, sync_dist=True)
+
+                # Surface energy distribution figure
+                fig_se = surf.plot_energy_distribution(
+                    surf_energies_dict,
+                    title="Surface energy (μ=0)",
+                    xlabel="Ω_surf (eV)",
+                )
+                if use_wandb:
+                    val_media["val/surface_energy_distribution"] = wandb.Image(fig_se)
+                else:
+                    self._log_figure_fallback(trainer, fig_se, "val/surface_energy_distribution")
+                plt.close(fig_se)
+
+                # Surface energy per composition figure
+                if adsorbate_comps_dict:
+                    fig_se_comp = surf.plot_energy_per_composition(
+                        surf_energies_dict,
+                        adsorbate_comps_dict,
+                        title="Surface energy by composition (μ=0)",
+                    )
+                    if use_wandb:
+                        val_media["val/surface_energy_per_composition"] = wandb.Image(fig_se_comp)
+                    else:
+                        self._log_figure_fallback(trainer, fig_se_comp, "val/surface_energy_per_composition")
+                    plt.close(fig_se_comp)
+            except Exception:
+                logger.warning("Surface energy (μ=0) validation failed", exc_info=True)
 
         # Surface stability plots (if chem pots given)
         if self.val_surface_chem_pots and self.data_type == "agxoy":
@@ -541,36 +612,29 @@ class SurfaceEvalCallback(pl.Callback):
                         ref_element=self.ref_element,
                     )
                     for i, fig in enumerate(figs):
-                        self._log_figure(trainer, fig, f"val/surface_stability_{i}")
+                        if use_wandb:
+                            val_media[f"val/surface_stability_{i}"] = wandb.Image(fig)
+                        else:
+                            self._log_figure_fallback(trainer, fig, f"val/surface_stability_{i}")
                         plt.close(fig)
                 except Exception:
                     # Keep other validation plots/metrics even if surface stability fails.
                     if trainer.logger is not None:
                         trainer.logger.log_metrics({"val/warn_surface_stability_failed": 1.0}, step=trainer.global_step)
 
+        # Single batched W&B log call — all images share one step → one panel per key
+        if use_wandb and val_media:
+            trainer.logger.experiment.log(val_media)
+
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         """Validation is orchestrated in VPDiffusion hooks."""
         return
 
-    def _log_figure(self, trainer: pl.Trainer, fig, key: str) -> None:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        buf.seek(0)
-        if hasattr(trainer.logger, "log_image"):
-            try:
-                import wandb
-                trainer.logger.log_image(
-                    key=key,
-                    images=[wandb.Image(fig)],
-                    step=trainer.global_step,
-                )
-                return
-            except Exception:
-                pass
+    def _log_figure_fallback(self, trainer: pl.Trainer, fig, key: str) -> None:
+        """Fallback figure logging for non-W&B loggers (TensorBoard, file save)."""
         if hasattr(trainer.logger, "experiment") and hasattr(trainer.logger.experiment, "add_figure"):
             trainer.logger.experiment.add_figure(key, fig, trainer.global_step)
             return
         save_path = self._log_dir(trainer) / f"{key.replace('/', '_')}.png"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        buf.close()

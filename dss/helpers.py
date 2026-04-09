@@ -148,11 +148,10 @@ def get_diffusion_model(
     gated_blocks=4,
     beta_max=3.0,
     beta_min=1e-2,
-    lr=1e-3,
+    lr=3e-4,
     neighbour_list=None,
     potential_model_instance=None,
     mode="diffusion",
-    scheduler_monitor="val_loss",
 ):
     import schnetpack as spk
 
@@ -196,8 +195,7 @@ def get_diffusion_model(
         beta_max=beta_max,
         beta_min=beta_min,
         optim_config={"lr": lr},
-        scheduler_config={"factor": 0.90, "patience": 100},
-        scheduler_monitor=scheduler_monitor,
+        scheduler_config={"step_size": 1000, "gamma": 0.995},
         mode=mode,
     )
 
