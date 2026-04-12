@@ -30,7 +30,10 @@ def main():
     parser.add_argument("--n_rbf", type=int, default=30, help="n_rbf for the score model")
     parser.add_argument("--z_conf_min", type=float, default=2.8613568, help="z_confinement minimum")
     parser.add_argument("--z_conf_max", type=float, default=6.49999996, help="z_confinement maximum")
-    
+    parser.add_argument("--guidance_eta", type=float, default=0.0,
+                        help="MACE force guidance scale η — passed to regressor_guidance_sample() "
+                             "as eta. DSS formula: guidance = (1-t)*η*F_MACE. 0 = disabled.")
+
     args = parser.parse_args()
 
     ag_range = range(args.ag_min, args.ag_max + 1)
@@ -74,7 +77,9 @@ def main():
             
             print(f"--> Sampling Ag{ag}O{o} (n={args.num_samples})...")
             
-            with torch.no_grad():
+            use_guidance = args.guidance_eta > 0.0
+            ctx = torch.enable_grad() if use_guidance else torch.no_grad()
+            with ctx:
                 sampled_atoms = sample(
                     diffusion=diffusion,
                     num_samples=args.num_samples,
@@ -82,7 +87,9 @@ def main():
                     symbols=symbols,
                     z_confinement=z_confinement,
                     num_steps=args.num_steps,
-                    return_trajectories=False
+                    return_trajectories=False,
+                    use_regressor_guidance=use_guidance,
+                    eta=args.guidance_eta,
                 )
             
             ase.io.write(output_file, sampled_atoms, format="extxyz")
