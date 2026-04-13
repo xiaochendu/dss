@@ -120,14 +120,21 @@ class MACEEnergyModel(nn.Module):
         return calc
 
     def _mace_calc(self):
-        """Return the underlying MACECalculator, unwrapping SumCalculator if dispersion=True."""
+        """Return the underlying MACECalculator, unwrapping SumCalculator if dispersion=True.
+
+        dispersion=True causes mace_mp() to return a SumCalculator whose sub-calculators
+        are accessed via calc.mixer.calcs (not calc.calcs).  The MACECalculator is the
+        one that has a .head attribute; D3 calculator does not.
+        """
         calc = self.calculator  # triggers lazy load
-        if hasattr(calc, "calcs"):
-            # dispersion=True wraps MACE + D3 in ase.calculators.mixing.SumCalculator
-            for c in calc.calcs:
+        # SumCalculator wraps sub-calcs in .mixer.calcs (ASE mixing module)
+        mixer = getattr(calc, "mixer", None)
+        if mixer is not None:
+            for c in getattr(mixer, "calcs", []):
                 if hasattr(c, "head"):
                     return c
-            raise RuntimeError("Could not find MACECalculator inside SumCalculator")
+            raise RuntimeError("Could not find MACECalculator inside SumCalculator.mixer.calcs")
+        # Plain MACECalculator (dispersion=False)
         return calc
 
     def get_energy_forces_batched(
