@@ -119,6 +119,17 @@ class MACEEnergyModel(nn.Module):
         logger.info("MACE model loaded successfully.")
         return calc
 
+    def _mace_calc(self):
+        """Return the underlying MACECalculator, unwrapping SumCalculator if dispersion=True."""
+        calc = self.calculator  # triggers lazy load
+        if hasattr(calc, "calcs"):
+            # dispersion=True wraps MACE + D3 in ase.calculators.mixing.SumCalculator
+            for c in calc.calcs:
+                if hasattr(c, "head"):
+                    return c
+            raise RuntimeError("Could not find MACECalculator inside SumCalculator")
+        return calc
+
     def get_energy_forces_batched(
         self,
         atoms_list: list[ase.Atoms],
@@ -128,6 +139,10 @@ class MACEEnergyModel(nn.Module):
         Builds one MACE AtomicData batch from atoms_list and runs the model once,
         rather than calling atoms.get_forces() sequentially. Typically 20-50x faster
         than get_energy_forces_atoms() for batch sizes >= 32.
+
+        When dispersion=True the underlying SumCalculator is unwrapped; returned
+        energies/forces are MACE-only (no D3 correction), which is acceptable for
+        guidance force computation.
 
         Args:
             atoms_list: List of ASE Atoms objects (all must have cell/pbc set).
@@ -139,7 +154,7 @@ class MACEEnergyModel(nn.Module):
         import mace.data as mace_data
         from mace.tools import torch_geometric
 
-        calc = self.calculator  # triggers lazy load
+        calc = self._mace_calc()  # unwraps SumCalculator if dispersion=True
 
         with torch.inference_mode(mode=False), torch.enable_grad():
             keyspec = mace_data.KeySpecification(info_keys={}, arrays_keys={})
