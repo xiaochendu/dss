@@ -898,12 +898,34 @@ _______
         if save_traj:
             traj = [self.batch_clone(batch)]
 
+        _r_device = batch[properties.R].device
+        _r_dtype = batch[properties.R].dtype
+
         for time in time_steps:
             t = torch.ones((batch["_idx_m"].shape[0], 1), device=self.device) * time
             disp = self.dispersion(time)
 
-            batch = self.potential(batch)
-            s = self.sample_forward(batch, t, w=w, condition=condition)
+            # Single preprocess: builds neighbour list + pairwise distances once per step.
+            batch = self.preprocess_batch(batch, save_keys=[])
+
+            # Score model (direct call — skips the redundant preprocess_batch in forward()).
+            if w is None:
+                s = self.score_model(batch, t, prob=0.0, condition=condition).view(
+                    batch[properties.R].shape
+                )
+            else:
+                s0 = self.score_model(batch, t, prob=1.0, condition=condition).view(
+                    batch[properties.R].shape
+                )
+                s1 = self.score_model(batch, t).view(batch[properties.R].shape)
+                s = (1 + w) * s0 - w * s1
+
+            # Batched MACE: one GPU forward pass for all structures in the batch.
+            _atoms_list = self.potential_model._batch_dict_to_atoms_list(batch)
+            _energies, _forces = self.potential_model.get_energy_forces_batched(_atoms_list)
+            batch[properties.energy] = _energies.to(device=_r_device, dtype=_r_dtype)
+            batch[properties.forces] = _forces.to(device=_r_device, dtype=_r_dtype)
+
             drift = disp**2 * s - self.forward_drift(batch[properties.R], t)
             noise = torch.randn_like(batch[properties.R])
 
@@ -996,20 +1018,29 @@ _______
                 clone["score"] = s
                 traj.append(clone)
 
-        batch = self.potential(batch)
+        # Final postrelax: single preprocess + batched MACE, no score-model calls needed.
+        batch = self.preprocess_batch(batch, save_keys=[])
+        _atoms_list = self.potential_model._batch_dict_to_atoms_list(batch)
+        _energies, _forces = self.potential_model.get_energy_forces_batched(_atoms_list)
+        batch[properties.energy] = _energies.to(device=_r_device, dtype=_r_dtype)
+        batch[properties.forces] = _forces.to(device=_r_device, dtype=_r_dtype)
 
         if eta > 0:
             for _ in range(postrelax_steps):
                 F = batch[properties.forces]
-                F = torch.nan_to_num(F, nan=0.0)                
+                F = torch.nan_to_num(F, nan=0.0)
                 if (F < fmax).all():
                     break
-                
+
                 step = eta * F
                 step[mask] = 0
                 batch[properties.R] = batch[properties.R] + step
-                
-                batch = self.potential(batch)
+
+                batch = self.preprocess_batch(batch, save_keys=[])
+                _atoms_list = self.potential_model._batch_dict_to_atoms_list(batch)
+                _energies, _forces = self.potential_model.get_energy_forces_batched(_atoms_list)
+                batch[properties.energy] = _energies.to(device=_r_device, dtype=_r_dtype)
+                batch[properties.forces] = _forces.to(device=_r_device, dtype=_r_dtype)
 
         if save_traj:
             return batch, traj
