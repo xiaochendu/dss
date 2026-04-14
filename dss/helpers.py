@@ -149,6 +149,7 @@ def get_diffusion_model(
     beta_max=3.0,
     beta_min=1e-2,
     lr=3e-4,
+    lr_step_size=1000,
     neighbour_list=None,
     potential_model_instance=None,
     mode="diffusion",
@@ -195,7 +196,7 @@ def get_diffusion_model(
         beta_max=beta_max,
         beta_min=beta_min,
         optim_config={"lr": lr},
-        scheduler_config={"step_size": 1000, "gamma": 0.995},
+        scheduler_config={"step_size": lr_step_size, "gamma": 0.995},
         mode=mode,
     )
 

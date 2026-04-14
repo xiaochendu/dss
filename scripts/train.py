@@ -89,6 +89,7 @@ def main():
     p.add_argument("--reuse_train_for_val", action="store_true", help="Reuse training split as validation dataset (useful with num_train=1.0 while keeping validation hooks/callbacks active).")
     p.add_argument("--max_epochs", type=int, default=100, help="Max training epochs")
     p.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    p.add_argument("--lr_step_size", type=int, default=1000, help="StepLR step size (optimizer steps). Scale with dataset: 30k→15000 to match per-epoch decay rate of 2k.")
     p.add_argument("--gradient_clip_val", type=float, default=10.0, help="Gradient clipping value (0 = disabled)")
     p.add_argument("--cutoff", type=float, default=6.0, help="Cutoff for neighbour list (Ang)")
     p.add_argument("--n_atom_basis", type=int, default=64, help="Number of GNN (PaiNN) atom features")
@@ -240,6 +241,7 @@ def main():
         n_rbf=args.n_rbf,
         n_interactions=args.n_interactions,
         lr=args.lr,
+        lr_step_size=args.lr_step_size,
         neighbour_list=neighbour_list,
         potential_model_instance=mace_energy_model,
         mode=args.mode,
