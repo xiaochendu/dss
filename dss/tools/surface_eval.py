@@ -81,11 +81,23 @@ def load_mace_energies(load_path: str | Path) -> tuple[torch.Tensor, dict | None
     return energies, metadata
 
 
+FAMILY_COLOR: dict[str, str] = {
+    "Train (relaxed)": "C5",
+    "DSS":             "C1",
+    "SnowyFlow-F":     "C0",
+    "SnowyFlow-V":     "C2",
+}
+
+
 def _resolve_color(label: str) -> str:
     """Map a distribution label to the project color cycle."""
+    if label in FAMILY_COLOR:
+        return FAMILY_COLOR[label]
     l = label.lower()
     if "train" in l:
         return "C5"
+    if "snowyflow-v" in l or "variable" in l:
+        return "C2"
     if any(k in l for k in ("snowy", "dfm", "flow", "sampled")):
         return "C0"
     if any(k in l for k in ("dss", "vp", "diffusion")):
