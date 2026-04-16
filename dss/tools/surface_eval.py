@@ -7,11 +7,13 @@ for surface datasets (SrTiO3 and beyond).
 import logging
 from pathlib import Path
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import torch
+from pathlib import Path as _Path
+from scipy.stats import gaussian_kde as _gaussian_kde
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,18 @@ def load_mace_energies(load_path: str | Path) -> tuple[torch.Tensor, dict | None
     return energies, metadata
 
 
+def _resolve_color(label: str) -> str:
+    """Map a distribution label to the project color cycle."""
+    l = label.lower()
+    if "train" in l:
+        return "C5"
+    if any(k in l for k in ("snowy", "dfm", "flow", "sampled")):
+        return "C0"
+    if any(k in l for k in ("dss", "vp", "diffusion")):
+        return "C1"
+    return "C0"
+
+
 def plot_energy_distribution(
     energies_dict: dict[str, torch.Tensor | np.ndarray],
     title: str = "Energy Distribution",
@@ -86,12 +100,18 @@ def plot_energy_distribution(
     per_atom: bool = False,
     num_atoms: int | None = None,
     save_path: str | Path | None = None,
-    figsize: tuple[float, float] = (3.3, 2.5),
+    figsize: tuple[float, float] = (3.375, 2.5),
     bins: int = 50,
     xlims: tuple[float, float] | None = None,
 ) -> plt.Figure:
-    """Plot energy distributions for comparison with standardized journal settings."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    """Plot energy distributions using KDE curves (journal style)."""
+    # Load shared matplotlibrc if available
+    _rc = _Path.home() / "matplotlibrc" / "matplotlibrc"
+    if _rc.exists():
+        mpl.rc_file(str(_rc))
+
+    FONTSIZE = 8
+    fig, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
 
     processed_energies = {}
     all_vals = []
@@ -107,43 +127,46 @@ def plot_energy_distribution(
     if per_atom and num_atoms is not None and num_atoms > 0 and xlabel == "Energy (eV)":
         xlabel = "Energy (eV/atom)"
 
-    # Determine common bin edges within x-axis limits
     if xlims is None:
-        min_e, max_e = np.min(all_vals), np.max(all_vals)
+        min_e, max_e = float(np.min(all_vals)), float(np.max(all_vals))
     else:
         min_e, max_e = xlims
-        ax.set_xlim(xlims)
-        
-    bin_edges = np.linspace(min_e, max_e, bins + 1)
+    xs = np.linspace(min_e, max_e, 400)
+    ax.set_xlim(min_e, max_e)
 
-    colors = {"Train": "#495567", "snowyflow": "#6465E9", "dss": "#4BA3E3", "Sampled": "#E8A23B"}
+    # Plot Train last so it sits on top; collect non-Train first
+    order = [k for k in processed_energies if k != "Train"] + (
+        ["Train"] if "Train" in processed_energies else []
+    )
+    for label in order:
+        energies = processed_energies[label]
+        if len(energies) < 2:
+            continue
+        color = _resolve_color(label)
+        lw = 1.0 if label == "Train" else 1.5
+        ls = "--" if label == "Train" else "-"
+        alpha_fill = 0.10 if label == "Train" else 0.15
+        try:
+            kde = _gaussian_kde(energies)
+            ys = kde(xs)
+        except Exception:
+            continue
+        ax.plot(xs, ys, color=color, linewidth=lw, linestyle=ls, label=label)
+        ax.fill_between(xs, ys, alpha=alpha_fill, color=color, linewidth=0)
 
-    for label, energies in processed_energies.items():
-        color = colors.get(label, None)
-        sns.histplot(
-            energies,
-            ax=ax,
-            bins=bin_edges,
-            label=label,
-            color=color,
-            alpha=0.4,
-            stat="density",
-            element="step",
-        )
+    ax.set_xlabel(xlabel, fontsize=FONTSIZE)
+    ax.set_ylabel("Density", fontsize=FONTSIZE)
+    if title:
+        ax.set_title(title, fontsize=FONTSIZE)
+    ax.tick_params(labelsize=FONTSIZE)
+    leg = ax.legend(frameon=True, fontsize=FONTSIZE)
+    leg.get_frame().set_boxstyle("Square", pad=0)
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Density")
-    ax.set_title(title)
-    ax.tick_params(labelsize=8)
-    ax.legend(frameon=False, fontsize=8)
-    
-    ax.spines['right'].set_visible(False)
-    ax.spines['top'].set_visible(False)
-    
-    plt.tight_layout()
+    ax.spines["right"].set_visible(False)
+    ax.spines["top"].set_visible(False)
 
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        fig.savefig(save_path, dpi=300)
         logger.info("Energy distribution plot saved to %s", save_path)
 
     return fig
